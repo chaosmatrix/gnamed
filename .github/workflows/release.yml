@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Darwin-Build-Upload
+        env:
+          CGO_ENABLED: 0
+          GOOS: darwin
+          GOARCH: amd64
+        run: |
+          go build -o ${GITHUB_REPOSITORY##*/}
+          tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json
+          rm -f ${GITHUB_REPOSITORY##*/}
+          sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
+      - name: Linux-Build-Upload
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -o ${GITHUB_REPOSITORY##*/}
+          tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json
+          rm -f ${GITHUB_REPOSITORY##*/}
+          sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
+      - name: Windows-Build-Upload
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -o ${GITHUB_REPOSITORY##*/}.exe
+          tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/}.exe configx/config.json
+          rm -f ${GITHUB_REPOSITORY##*/}.exe
+          sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
+      - name: Upload checksum
+        run: |
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum $GITHUB_TOKEN
