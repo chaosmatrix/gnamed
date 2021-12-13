@@ -11,8 +11,8 @@ import (
 )
 
 func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
-	queryx.Query(r, cfg)
-	w.WriteMsg(r)
+	rmsg, _ := queryx.Query(r, cfg)
+	w.WriteMsg(rmsg)
 }
 
 func serveDoD(listen configx.Listen, wg *sync.WaitGroup) {

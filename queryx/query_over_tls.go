@@ -7,9 +7,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func queryDoT(r *dns.Msg, dot *configx.DOTServer) error {
-	var err error
-	rmsg := r.Copy()
+func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
 	tlsConfig := &tls.Config{
 		ServerName: dot.TlsConfig.ServerName,
 	}
@@ -22,11 +20,13 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) error {
 		WriteTimeout:   dot.Timeout.WriteDuration,
 		SingleInflight: true,
 	}
-	resp, _, err := client.Exchange(rmsg, dot.Server)
+	resp, _, err := client.Exchange(r, dot.Server)
 	if err != nil {
-		return err
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		return rmsg, err
 	}
 
-	reply(r, resp)
-	return nil
+	resp.SetReply(r)
+	return resp, nil
 }

@@ -65,3 +65,8 @@ $ gnamed
 * [ ] optimization: blacklist/whitelist `contains` rule match algorithm
 * [ ] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
+
+## References
+### NameServers
+1. https://developers.cloudflare.com/1.1.1.1/
+2. https://my.nextdns.io/start

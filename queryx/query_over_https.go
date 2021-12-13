@@ -48,7 +48,9 @@ curl --location --request GET "https://dns.google.com/resolve?name=www.google.co
  --header "Accept: application/dns-json"
 */
 
-func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) error {
+func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
+	rmsg := new(dns.Msg)
+
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 	dohUrl := doh.Url
@@ -60,7 +62,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) error {
 
 	req, err := http.NewRequest(doh.Method, dohUrl, nil)
 	if err != nil {
-		return err
+		return rmsg, err
 	}
 	if len(doh.Headers) != 0 {
 		req.Header = doh.Headers
@@ -73,23 +75,22 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return rmsg, err
 	}
 	if resp.StatusCode != 200 {
-		return errors.New(resp.Status)
+		return rmsg, errors.New(resp.Status)
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
-		return err
+		return rmsg, err
 	}
 	var gresp GResJson
 	err = json.Unmarshal(body, &gresp)
 	if err != nil {
-		return err
+		return rmsg, err
 	}
 
-	rmsg := new(dns.Msg)
 	for _, ans := range gresp.Question {
 		question := dns.Question{
 			Name:  ans.Name,
@@ -101,14 +102,14 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) error {
 		//example.com.              0       IN      A       1.2.3.4
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
-			return err
+			return rmsg, err
 		}
 		rmsg.Answer = append(rmsg.Answer, rr)
 	}
 	for _, ans := range gresp.Authority {
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
-			return err
+			return rmsg, err
 		}
 		rmsg.Ns = append(rmsg.Ns, rr)
 	}
@@ -121,24 +122,23 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) error {
 			rmsg.Extra = append(rmsg.Extra, rr)
 		}
 	*/
-	reply(r, rmsg)
-	return nil
+	return rmsg, err
 }
 
 // DOH Format: RFC8484
 // content-type: application/dns-message
 // request body: encoded dns message (bytes), only contains Question Sections
 // response body: encoded dns message (bytes), contain Question/Answer/... Sections
-func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) error {
+func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	qmsg := r.Copy()
 
 	bmsg, err := qmsg.Pack()
 	if err != nil {
-		return err
+		return qmsg, err
 	}
 	req, err := http.NewRequest(doh.Method, doh.Url, bytes.NewReader(bmsg))
 	if err != nil {
-		return err
+		return qmsg, err
 	}
 	if len(doh.Headers) != 0 {
 		req.Header = doh.Headers
@@ -151,32 +151,31 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return qmsg, err
 	}
 	if resp.StatusCode != 200 {
-		return errors.New(resp.Status)
+		return qmsg, errors.New(resp.Status)
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
-		return err
+		return qmsg, err
 	}
 	err = qmsg.Unpack(body)
 	if err != nil {
-		return err
+		return qmsg, err
 	}
 
-	reply(r, qmsg)
-	return nil
+	return qmsg, err
 }
 
-func queryDoH(r *dns.Msg, doh *configx.DOHServer) error {
+func queryDoH(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	switch doh.Format {
 	case configx.DOHMsgTypeJSON:
 		return queryDoHJson(r, doh)
 	case configx.DOHMsgTypeRFC8484:
 		return queryDoHRFC8484(r, doh)
 	default:
-		return fmt.Errorf("DOH Format '%s' not support", doh.Format)
+		return r.Copy(), fmt.Errorf("DOH Format '%s' not support", doh.Format)
 	}
 }

@@ -10,11 +10,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-func Query(r *dns.Msg, config *configx.Config) error {
+func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	return query(r, config)
 }
 
-func query(r *dns.Msg, config *configx.Config) error {
+func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	var err error
 
 	name := r.Question[0].Name
@@ -33,17 +33,15 @@ func query(r *dns.Msg, config *configx.Config) error {
 	// 0. lock - ensure single flying query or internal search
 	// 1. whitelist/blacklist search
 	if _r, _s, _forbidden := config.Query.QueryForbidden(name, qtype); _forbidden {
-		_logEvent.Str("query_type", "query_fake").Str("blacklist", _r+"_"+_s)
-		err = queryFake(r, nil)
-		if err != nil {
-			_logEvent.Err(err)
-		}
-		_logEvent.Msg("")
-		return err
+		_logEvent.Str("query_type", "query_fake").Str("blacklist", _r+"_"+_s).Msg("")
+		return queryFake(r, nil)
 	}
 
 	// handle cname
 	oldname := name
+	oldMsg := new(dns.Msg)
+	oldMsg.SetReply(r)
+
 	cname, vname := config.Server.FindRealName(name)
 	_logEvent.Str("view_name", vname)
 	if len(cname) != 0 && cname != name {
@@ -53,13 +51,23 @@ func query(r *dns.Msg, config *configx.Config) error {
 			r.Question[i].Name = cname
 		}
 	}
+
+	rmsg := new(dns.Msg)
+	rmsg.SetReply(r)
+
 	// 2. cache search
-	if cacheGetDnsMsg(r) {
+	if cacheGetDnsMsg(rmsg) {
 		if oldname != name {
-			replyUpdateName(r, oldname)
+			replyUpdateName(rmsg, oldname)
 		}
 		_logEvent.Str("query_type", "").Str("cache", "hit").Msg("")
-		return nil
+		// Fix OPT PSEUDOSECTION COOKIE
+		if opt := r.IsEdns0(); opt != nil {
+			if ropt := rmsg.IsEdns0(); ropt != nil {
+				*ropt = *opt
+			}
+		}
+		return rmsg, nil
 	}
 	// 3. external query
 	dnsTag, nameserver := config.Server.FindNameServer(r.Question[0].Name)
@@ -74,39 +82,38 @@ func query(r *dns.Msg, config *configx.Config) error {
 		_rr, _err := dns.NewRR(_msg)
 		if _err != nil {
 			_logEvent.Err(err).Msg("")
-			return _err
+			// FIXME
+			return oldMsg, _err
 		}
-		r.Answer = []dns.RR{_rr}
+		oldMsg.Answer = []dns.RR{_rr}
 		_logEvent.Msg("")
-		return nil
+		return oldMsg, nil
 	}
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
 		_logEvent.Str("query_type", "query_dns")
-		err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, &nameserver.Dns)
 	case configx.ProtocolTypeDoH:
 		_logEvent.Str("query_type", "query_doh")
-		err = queryDoH(r, &nameserver.DoH)
+		rmsg, err = queryDoH(r, &nameserver.DoH)
 	case configx.ProtocolTypeDoT:
 		_logEvent.Str("query_type", "query_dot")
-		err = queryDoT(r, &nameserver.DoT)
+		rmsg, err = queryDoT(r, &nameserver.DoT)
 	default:
 		_logEvent.Str("query_type", "query_dns")
-		err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, &nameserver.Dns)
 	}
 	// 4. cache response
 	if err == nil {
 		_logEvent.Str("rcode", dns.RcodeToString[r.Rcode])
 
-		if ok := cacheSetDnsMsg(r, &config.Server.Cache); ok {
+		if ok := cacheSetDnsMsg(rmsg, &config.Server.Cache); ok {
 			_logEvent.Str("cache", "update")
 		}
 	}
-	if oldname != name {
-		replyUpdateName(r, oldname)
-	}
 	_logEvent.Err(err).Msg("")
-	return err
+	replyUpdateName(rmsg, oldname)
+	return rmsg, err
 }
 
 func cacheSetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) bool {
@@ -165,38 +172,15 @@ func cacheGetDnsMsg(r *dns.Msg) bool {
 			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("name", name).Uint16("qtype", qtype).Err(err).Msg("")
 			return false
 		}
-		reply(r, resp)
+		r.Answer = resp.Copy().Answer
+		r.Ns = resp.Copy().Copy().Ns
+		r.Extra = resp.Copy().Extra
+		r.Rcode = resp.Copy().Rcode
+		r.RecursionAvailable = r.RecursionDesired
 		return true
 	}
 
 	return false
-}
-
-func reply(r *dns.Msg, resp *dns.Msg) {
-	r.Answer = resp.Copy().Answer
-	r.Ns = resp.Copy().Copy().Ns
-	r.Extra = resp.Copy().Extra
-	r.Rcode = resp.Copy().Rcode
-	if r.Question[0].Name != resp.Question[0].Name {
-		// ANSWER SECTION
-		for _idx, _ := range r.Answer {
-			if r.Answer[_idx].Header().Name == resp.Question[0].Name {
-				r.Answer[_idx].Header().Name = r.Question[0].Name
-			}
-		}
-		// AUTHORITY SECTION
-		for _idx, _ := range r.Ns {
-			if r.Ns[_idx].Header().Name == resp.Question[0].Name {
-				r.Ns[_idx].Header().Name = r.Question[0].Name
-			}
-		}
-		// ADDITIONAL SECTION
-		for _idx, _ := range r.Extra {
-			if r.Extra[_idx].Header().Name == resp.Question[0].Name {
-				r.Extra[_idx].Header().Name = r.Question[0].Name
-			}
-		}
-	}
 }
 
 func replyUpdateName(r *dns.Msg, oldname string) {
