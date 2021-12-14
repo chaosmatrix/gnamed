@@ -17,10 +17,23 @@ func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	var err error
 
+	_logEvent := libnamed.Logger.Debug().Uint16("id", r.Id)
+	if r == nil {
+		err = errors.New("invalid dns message")
+		return new(dns.Msg), err
+	}
+	if len(r.Question) == 0 {
+		err = errors.New("dns message hasn't valid question")
+		_logEvent.Err(err).Msg("")
+		r.SetReply(r)
+		r.Rcode = dns.RcodeFormatError
+		return r, err
+	}
+
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 
-	_logEvent := libnamed.Logger.Debug().Str("name", name).Str("qtype", qtype)
+	_logEvent.Str("name", name).Str("qtype", qtype)
 
 	// Filter
 	// 1. validate domain
@@ -110,9 +123,14 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 		if ok := cacheSetDnsMsg(rmsg, &config.Server.Cache); ok {
 			_logEvent.Str("cache", "update")
 		}
+	} else {
+		_logEvent.Err(err)
+		rmsg = new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeServerFailure
 	}
-	_logEvent.Err(err).Msg("")
 	replyUpdateName(rmsg, oldname)
+	_logEvent.Msg("")
 	return rmsg, err
 }
 
@@ -185,6 +203,9 @@ func cacheGetDnsMsg(r *dns.Msg) bool {
 
 func replyUpdateName(r *dns.Msg, oldname string) {
 
+	if len(r.Question) == 0 {
+		return
+	}
 	qname := r.Question[0].Name
 	if qname != oldname {
 		// Question SECTION

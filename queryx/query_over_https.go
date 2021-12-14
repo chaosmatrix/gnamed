@@ -14,6 +14,11 @@ import (
 	"github.com/miekg/dns"
 )
 
+var (
+	ErrDoHServerRefused = errors.New("doh server response status_code 403")
+	ErrDoHServerFailure = errors.New("doh server response status_code not 2xx")
+)
+
 // Google JSON Format
 type GQuestion struct {
 	Name string `json:"name"`
@@ -50,6 +55,7 @@ curl --location --request GET "https://dns.google.com/resolve?name=www.google.co
 
 func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	rmsg := new(dns.Msg)
+	rmsg.SetReply(r)
 
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
@@ -62,6 +68,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	req, err := http.NewRequest(doh.Method, dohUrl, nil)
 	if err != nil {
+		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 	if len(doh.Headers) != 0 {
@@ -75,33 +82,43 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
-	if resp.StatusCode != 200 {
-		return rmsg, errors.New(resp.Status)
+	if resp.StatusCode == http.StatusForbidden {
+		rmsg.Rcode = dns.RcodeRefused
+		return rmsg, ErrDoHServerRefused
+	} else if resp.StatusCode != http.StatusOK {
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, ErrDoHServerFailure
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
+		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 	var gresp GResJson
 	err = json.Unmarshal(body, &gresp)
 	if err != nil {
+		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
 
-	for _, ans := range gresp.Question {
-		question := dns.Question{
-			Name:  ans.Name,
-			Qtype: ans.Type,
+	/*
+		for _, ans := range gresp.Question {
+			question := dns.Question{
+				Name:  ans.Name,
+				Qtype: ans.Type,
+			}
+			rmsg.Question = append(rmsg.Question, question)
 		}
-		rmsg.Question = append(rmsg.Question, question)
-	}
+	*/
 	for _, ans := range gresp.Answer {
 		//example.com.              0       IN      A       1.2.3.4
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
+			rmsg.Rcode = dns.RcodeFormatError
 			return rmsg, err
 		}
 		rmsg.Answer = append(rmsg.Answer, rr)
@@ -109,6 +126,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	for _, ans := range gresp.Authority {
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
+			rmsg.Rcode = dns.RcodeFormatError
 			return rmsg, err
 		}
 		rmsg.Ns = append(rmsg.Ns, rr)
@@ -122,6 +140,9 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 			rmsg.Extra = append(rmsg.Extra, rr)
 		}
 	*/
+	if len(rmsg.Answer) == 0 {
+		rmsg.Rcode = dns.RcodeNameError
+	}
 	return rmsg, err
 }
 
@@ -130,15 +151,19 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 // request body: encoded dns message (bytes), only contains Question Sections
 // response body: encoded dns message (bytes), contain Question/Answer/... Sections
 func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
-	qmsg := r.Copy()
 
-	bmsg, err := qmsg.Pack()
+	rmsg := new(dns.Msg)
+	rmsg.SetReply(r)
+
+	bmsg, err := r.Pack()
 	if err != nil {
-		return qmsg, err
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, err
 	}
 	req, err := http.NewRequest(doh.Method, doh.Url, bytes.NewReader(bmsg))
 	if err != nil {
-		return qmsg, err
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, err
 	}
 	if len(doh.Headers) != 0 {
 		req.Header = doh.Headers
@@ -151,22 +176,29 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return qmsg, err
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, err
 	}
-	if resp.StatusCode != 200 {
-		return qmsg, errors.New(resp.Status)
+	if resp.StatusCode == http.StatusForbidden {
+		rmsg.Rcode = dns.RcodeRefused
+		return rmsg, ErrDoHServerRefused
+	} else if resp.StatusCode != http.StatusOK {
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, ErrDoHServerFailure
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	if err != nil {
-		return qmsg, err
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, err
 	}
-	err = qmsg.Unpack(body)
+	err = rmsg.Unpack(body)
 	if err != nil {
-		return qmsg, err
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, err
 	}
 
-	return qmsg, err
+	return rmsg, err
 }
 
 func queryDoH(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {

@@ -428,6 +428,8 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 		return QueryListTypePrefix, rule, found
 	}
 	// len(ql.Contain) * O(avg(len(_contain)))
+	// Optimization: Aho-Corasick or flashtext
+	// flashtext https://arxiv.org/pdf/1711.00046.pdf
 	for _, _contain := range ql.Contain {
 		if strings.Contains(name, _contain) {
 			return "Contain", _contain, true

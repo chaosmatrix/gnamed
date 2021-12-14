@@ -24,9 +24,8 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
 	if err != nil {
 		rmsg := new(dns.Msg)
 		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
-
-	resp.SetReply(r)
 	return resp, nil
 }

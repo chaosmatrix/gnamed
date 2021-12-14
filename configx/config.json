@@ -49,7 +49,14 @@
             "A": {
                 "equal": [],
                 "prefix": [],
-                "suffix": ["adobe.io"],
+                "suffix": ["adobe.io."],
+                "contain": [".ad."],
+                "regexp": ["\\d{5,63}"]
+            },
+            "AAAA": {
+                "equal": [],
+                "prefix": [],
+                "suffix": ["adobe.io."],
                 "contain": [".ad."],
                 "regexp": ["\\d{5,63}"]
             }
