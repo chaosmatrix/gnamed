@@ -31,10 +31,11 @@ var (
 )
 
 type Config struct {
-	Server Server `json:"server"`
-	Query  Query  `json:"query"`
-	Admin  Admin  `json:"admin"`
-	Files  Files  `json:"files"`
+	singleflightGroup *libnamed.Group `json:"-"`
+	Server            Server          `json:"server"`
+	Query             Query           `json:"query"`
+	Admin             Admin           `json:"admin"`
+	Files             Files           `json:"files"`
 }
 
 type Server struct {
@@ -54,6 +55,8 @@ type Main struct {
 	// unix:/path/syslog.socket
 	LogFile  string `json:"logFile"`
 	LogLevel string `json:"logLevel"`
+
+	Singleflight bool `json:"singleflight"`
 }
 
 // Server -> Listen
@@ -222,6 +225,9 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	cfg.Server.Main.verify()
+	if cfg.Server.Main.Singleflight {
+		cfg.singleflightGroup = new(libnamed.Group)
+	}
 
 	fqdnQueryList(cfg.Query.BlackList)
 	fqdnQueryList(cfg.Query.WhiteList)
@@ -233,6 +239,10 @@ func parseConfig(fname string) (Config, error) {
 	contructQueryList(cfg.Query.WhiteList)
 
 	return cfg, err
+}
+
+func (cfg *Config) GetSingleFlightGroup() *libnamed.Group {
+	return cfg.singleflightGroup
 }
 
 func (mf *Main) verify() bool {

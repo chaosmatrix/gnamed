@@ -11,24 +11,64 @@ import (
 )
 
 func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
-	return query(r, config)
+
+	var err error
+
+	// pre-check
+	if r == nil {
+		err = errors.New("invalid dns message")
+		libnamed.Logger.Error().Err(err).Msgf("%v", r)
+		return new(dns.Msg), err
+	}
+	if len(r.Question) == 0 {
+		err = errors.New("dns message hasn't valid question")
+		libnamed.Logger.Debug().Uint16("id", r.Id).Err(err).Msg("")
+		r.SetReply(r)
+		r.Rcode = dns.RcodeFormatError
+		return r, err
+	}
+
+	// disable singleflight
+	if !config.Server.Main.Singleflight {
+		return query(r, config)
+	}
+
+	// enable singleflight
+	singleflightGroup := config.GetSingleFlightGroup()
+	f := func() (*dns.Msg, error) {
+		return query(r, config)
+	}
+
+	origName := r.Question[0].Name
+	key := strings.ToLower(origName) + "_" + dns.TypeToString[r.Question[0].Qtype]
+
+	rmsg, err, hit := singleflightGroup.Do(key, f)
+
+	// query() make sure rmsg not nil, and always a valid *dns.Msg
+	replyUpdateName(rmsg, origName)
+
+	libnamed.Logger.Trace().Uint16("id", r.Id).Str("key", key).Bool("singleflight", hit).Msg("")
+	// BUG: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
+	if hit {
+		// return from prev copy
+		rcode := rmsg.Rcode
+		rmsg.SetReply(r)
+		rmsg.Rcode = rcode
+		// Fix OPT PSEUDOSECTION COOKIE
+		if opt := r.IsEdns0(); opt != nil {
+			if ropt := rmsg.IsEdns0(); ropt != nil {
+				*ropt = *opt
+			}
+		}
+		return rmsg, err
+	}
+	return rmsg, err
 }
 
 func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	var err error
 
 	_logEvent := libnamed.Logger.Debug().Uint16("id", r.Id)
-	if r == nil {
-		err = errors.New("invalid dns message")
-		return new(dns.Msg), err
-	}
-	if len(r.Question) == 0 {
-		err = errors.New("dns message hasn't valid question")
-		_logEvent.Err(err).Msg("")
-		r.SetReply(r)
-		r.Rcode = dns.RcodeFormatError
-		return r, err
-	}
 
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
@@ -65,11 +105,8 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 		}
 	}
 
-	rmsg := new(dns.Msg)
-	rmsg.SetReply(r)
-
 	// 2. cache search
-	if cacheGetDnsMsg(rmsg) {
+	if rmsg, found := cacheGetDnsMsg(r); found {
 		if oldname != name {
 			replyUpdateName(rmsg, oldname)
 		}
@@ -102,6 +139,10 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 		_logEvent.Msg("")
 		return oldMsg, nil
 	}
+
+	rmsg := new(dns.Msg)
+	rmsg.SetReply(r)
+
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
 		_logEvent.Str("query_type", "query_dns")
@@ -174,31 +215,35 @@ func cacheSetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) bool {
 			}
 		}
 	}
-	return cachex.Set(r.Question[0].Name, r.Question[0].Qtype, bmsg, ttl)
+	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, ttl)
 }
 
-func cacheGetDnsMsg(r *dns.Msg) bool {
+func cacheGetDnsMsg(r *dns.Msg) (*dns.Msg, bool) {
 	resp := new(dns.Msg)
 
 	name := r.Question[0].Name
 	qtype := r.Question[0].Qtype
-	if bmsg, found := cachex.Get(name, qtype); found {
+	if bmsg, found := cachex.Get(strings.ToLower(name), qtype); found {
 		if err := resp.Unpack(bmsg); err != nil {
 			// 1. log error
 			// 2. delete cache ?
 			// 3. ignore
 			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("name", name).Uint16("qtype", qtype).Err(err).Msg("")
-			return false
+			return nil, false
 		}
-		r.Answer = resp.Copy().Answer
-		r.Ns = resp.Copy().Copy().Ns
-		r.Extra = resp.Copy().Extra
-		r.Rcode = resp.Copy().Rcode
-		r.RecursionAvailable = r.RecursionDesired
-		return true
+		/*
+			resp.RecursionAvailable = r.RecursionDesired
+			r.Answer = resp.Copy().Answer
+			r.Ns = resp.Copy().Copy().Ns
+			r.Extra = resp.Copy().Extra
+			r.Rcode = resp.Copy().Rcode
+			r.RecursionAvailable = r.RecursionDesired
+		*/
+		resp.SetReply(r)
+		return resp, true
 	}
 
-	return false
+	return nil, false
 }
 
 func replyUpdateName(r *dns.Msg, oldname string) {
@@ -229,6 +274,20 @@ func replyUpdateName(r *dns.Msg, oldname string) {
 			if r.Extra[_idx].Header().Name == qname {
 				r.Extra[_idx].Header().Name = oldname
 			}
+		}
+	}
+}
+
+func setReply(resp *dns.Msg, r *dns.Msg) {
+	rcode := resp.Rcode
+	resp.SetReply(r)
+	resp.Rcode = rcode
+
+	// Fix OPT PSEUDOSECTION COOKIE
+	if opt := r.IsEdns0(); opt != nil {
+		if ropt := resp.IsEdns0(); ropt != nil {
+			// echo cookie
+			*ropt = *opt
 		}
 	}
 }

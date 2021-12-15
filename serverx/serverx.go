@@ -9,6 +9,10 @@ import (
 
 var cfg *configx.Config
 
+var (
+	ErrServerProtocolUnsupport = errors.New("protocol unsupport")
+)
+
 func Serve(config *configx.Config, wg *sync.WaitGroup) {
 	cfg = config
 
@@ -19,7 +23,7 @@ func Serve(config *configx.Config, wg *sync.WaitGroup) {
 			_logger.Str("server_type", "dns")
 			serveDoD(_listen, wg)
 		default:
-			_logger.Err(errors.New("Protocol Unsupport"))
+			_logger.Err(ErrServerProtocolUnsupport)
 		}
 		_logger.Msg("")
 	}
