@@ -42,12 +42,12 @@ func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	origName := r.Question[0].Name
 	key := strings.ToLower(origName) + "_" + dns.TypeToString[r.Question[0].Qtype]
 
-	rmsg, err, hit := singleflightGroup.Do(key, f)
+	rmsg, hit, err := singleflightGroup.Do(key, f)
 
 	// query() make sure rmsg not nil, and always a valid *dns.Msg
 	replyUpdateName(rmsg, origName)
 
-	libnamed.Logger.Trace().Uint16("id", r.Id).Str("key", key).Bool("singleflight", hit).Msg("")
+	libnamed.Logger.Trace().Str("log_type", "filter").Uint16("id", r.Id).Str("key", key).Bool("singleflight", hit).Msg("")
 	// BUG: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
 	if hit {
 		// return from prev copy
@@ -68,7 +68,7 @@ func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	var err error
 
-	_logEvent := libnamed.Logger.Debug().Uint16("id", r.Id)
+	_logEvent := libnamed.Logger.Debug().Str("log_type", "query").Uint16("id", r.Id)
 
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]

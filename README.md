@@ -51,8 +51,9 @@ $ gnamed
 
 ### TODO-List
 * [x] server: dns protocol support
-* [ ] server: dns-over-https protocol support
+* [x] server: dns-over-https protocol support
 * [ ] server: dns-over-tls protocol support
+* [x] server: ensure singlefligh incoming query
 * [x] query: dns protocol support
 * [x] query: dns-over-https protocol support
 * [x] query: dns-over-tls protocol support
@@ -65,6 +66,7 @@ $ gnamed
 * [ ] optimization: blacklist/whitelist `contains` rule match algorithm
 * [ ] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
+* [ ] optimization: log format and fields
 
 ## References
 ### NameServers

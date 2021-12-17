@@ -41,7 +41,7 @@ type Group struct {
 // sure that only one execution is in-flight for a given key at a
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
-func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, error, bool) {
+func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*call)
@@ -49,7 +49,8 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, error, bo
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
 		c.wg.Wait()
-		return c.val, c.err, true
+		// caller might update value, need to do copy
+		return c.val.Copy(), true, c.err
 	}
 	c := new(call)
 	c.wg.Add(1)
@@ -63,5 +64,5 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, error, bo
 	delete(g.m, key)
 	g.mu.Unlock()
 
-	return c.val, c.err, false
+	return c.val, false, c.err
 }

@@ -41,10 +41,10 @@ type GResJson struct {
 	CD        bool        `json:"CD"`
 	Question  []GQuestion `json:"Question"`
 	Answer    []GAnswer   `json:"Answer"`
-	Authority []GAnswer   `json:"Authority"`
-	Aditional []string    `json:"Aditional"` // ?
-	ECS       string      `json:"edns_client_subnet"`
-	Comment   string      `json:"Comment"`
+	Authority []GAnswer   `json:"Authority,omitempty"`
+	Aditional []string    `json:"Aditional,omitempty"` // ?
+	ECS       string      `json:"edns_client_subnet,omitempty"`
+	Comment   string      `json:"Comment,omitempty"`
 }
 
 /*
@@ -75,7 +75,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 		req.Header = doh.Headers
 	}
 	if _, found := doh.Headers["Accept"]; !found {
-		req.Header.Set("Accept", "application/dns-json")
+		req.Header.Set("Accept", configx.DOHAcceptHeaderTypeJSON)
 	}
 	client := &http.Client{
 		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
@@ -169,7 +169,7 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 		req.Header = doh.Headers
 	}
 	if _, found := doh.Headers["Accept"]; !found {
-		req.Header.Set("Accept", "application/dns-message")
+		req.Header.Set("Accept", configx.DOHAccetpHeaderTypeRFC8484)
 	}
 	client := &http.Client{
 		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
