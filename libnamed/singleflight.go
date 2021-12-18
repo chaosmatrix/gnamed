@@ -64,5 +64,6 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 	delete(g.m, key)
 	g.mu.Unlock()
 
-	return c.val, false, c.err
+	// if no concurrency flying request, it wast time to do deep copy
+	return c.val.Copy(), false, c.err
 }

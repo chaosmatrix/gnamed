@@ -12,11 +12,11 @@ import (
 )
 
 func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
-	_logEvent := libnamed.Logger.Trace().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS)
-	rmsg, err := queryx.Query(r, cfg)
-	_logEvent.Uint16("id", rmsg.Id).Str("name", rmsg.Question[0].Name).Str("type", dns.TypeToString[rmsg.Question[0].Qtype])
-	_logEvent.Err(err).Msg("")
+	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS)
+	start := time.Now()
+	rmsg, err := queryx.Query(r, cfg, logEvent)
 	w.WriteMsg(rmsg)
+	logEvent.Err(err).Dur("latency", time.Since(start)).Msg("")
 }
 
 func serveDoD(listen configx.Listen, wg *sync.WaitGroup) {

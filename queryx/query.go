@@ -6,11 +6,13 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
-func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
+func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Msg, error) {
 
 	var err error
 
@@ -27,28 +29,30 @@ func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 		r.Rcode = dns.RcodeFormatError
 		return r, err
 	}
-
+	origName := r.Question[0].Name
+	qtype := dns.TypeToString[r.Question[0].Qtype]
+	logEvent.Str("orig_name", origName).Str("qtype", qtype)
 	// disable singleflight
 	if !config.Server.Main.Singleflight {
-		return query(r, config)
+		return query(r, config, logEvent)
 	}
 
 	// enable singleflight
-	singleflightGroup := config.GetSingleFlightGroup()
+	singleflightGroup := config.GetSingleFlightGroup(qtype)
 	f := func() (*dns.Msg, error) {
-		return query(r, config)
+		return query(r, config, logEvent)
 	}
 
-	origName := r.Question[0].Name
-	key := strings.ToLower(origName) + "_" + dns.TypeToString[r.Question[0].Qtype]
+	key := strings.ToLower(origName)
 
 	rmsg, hit, err := singleflightGroup.Do(key, f)
 
 	// query() make sure rmsg not nil, and always a valid *dns.Msg
 	replyUpdateName(rmsg, origName)
 
-	libnamed.Logger.Trace().Str("log_type", "filter").Uint16("id", r.Id).Str("key", key).Bool("singleflight", hit).Msg("")
-	// BUG: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
+	logEvent.Str("key", key).Bool("singleflight", hit)
+	// NOTICE: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
+	// singleflight already make sure do deep copy, return values are concurrency safe.
 	if hit {
 		// return from prev copy
 		rcode := rmsg.Rcode
@@ -65,20 +69,17 @@ func Query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	return rmsg, err
 }
 
-func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
+func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Msg, error) {
 	var err error
-
-	_logEvent := libnamed.Logger.Debug().Str("log_type", "query").Uint16("id", r.Id)
 
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 
-	_logEvent.Str("name", name).Str("qtype", qtype)
-
+	logEvent.Str("name", name)
 	// Filter
 	// 1. validate domain
 	if !libnamed.ValidateDomain(name) {
-		_logEvent.Str("query_type", "query_fake").Err(errors.New("invalid domain base on RFC 1035 and RFC 3696")).Msg("")
+		logEvent.Str("query_type", "query_fake").Err(errors.New("invalid domain base on RFC 1035 and RFC 3696"))
 		return queryFake(r, nil)
 	}
 
@@ -86,7 +87,7 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	// 0. lock - ensure single flying query or internal search
 	// 1. whitelist/blacklist search
 	if _r, _s, _forbidden := config.Query.QueryForbidden(name, qtype); _forbidden {
-		_logEvent.Str("query_type", "query_fake").Str("blacklist", _r+"_"+_s).Msg("")
+		logEvent.Str("query_type", "query_fake").Str("blacklist", _r+"_"+_s)
 		return queryFake(r, nil)
 	}
 
@@ -96,10 +97,10 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	oldMsg.SetReply(r)
 
 	cname, vname := config.Server.FindRealName(name)
-	_logEvent.Str("view_name", vname)
+	logEvent.Str("view_name", vname)
 	if len(cname) != 0 && cname != name {
 		name = cname
-		_logEvent.Str("cname", cname)
+		logEvent.Str("cname", cname)
 		for i, _ := range r.Question {
 			r.Question[i].Name = cname
 		}
@@ -110,7 +111,7 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 		if oldname != name {
 			replyUpdateName(rmsg, oldname)
 		}
-		_logEvent.Str("query_type", "").Str("cache", "hit").Msg("")
+		logEvent.Str("query_type", "").Str("cache", "hit")
 		// Fix OPT PSEUDOSECTION COOKIE
 		if opt := r.IsEdns0(); opt != nil {
 			if ropt := rmsg.IsEdns0(); ropt != nil {
@@ -121,57 +122,57 @@ func query(r *dns.Msg, config *configx.Config) (*dns.Msg, error) {
 	}
 	// 3. external query
 	dnsTag, nameserver := config.Server.FindNameServer(r.Question[0].Name)
-	_logEvent.Str("nameserver_tag", dnsTag)
+	logEvent.Str("nameserver_tag", dnsTag)
 
 	if nameserver == nil {
 		// FIXME: reply from hosts file
 		_record, _ := config.Server.FindRecordFromHosts(r.Question[0].Name, dns.TypeToString[r.Question[0].Qtype])
 		_msg := strings.Join([]string{name, "60", "IN", qtype, _record}, "    ")
 
-		_logEvent.Str("query_type", "hosts")
+		logEvent.Str("query_type", "hosts")
 		_rr, _err := dns.NewRR(_msg)
 		if _err != nil {
-			_logEvent.Err(err).Msg("")
+			logEvent.Err(err)
 			// FIXME
 			return oldMsg, _err
 		}
 		oldMsg.Answer = []dns.RR{_rr}
-		_logEvent.Msg("")
 		return oldMsg, nil
 	}
 
 	rmsg := new(dns.Msg)
 	rmsg.SetReply(r)
 
+	queryStartTime := time.Now()
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
-		_logEvent.Str("query_type", "query_dns")
+		logEvent.Str("query_type", "query_dns")
 		rmsg, err = queryDoD(r, &nameserver.Dns)
 	case configx.ProtocolTypeDoH:
-		_logEvent.Str("query_type", "query_doh")
+		logEvent.Str("query_type", "query_doh")
 		rmsg, err = queryDoH(r, &nameserver.DoH)
 	case configx.ProtocolTypeDoT:
-		_logEvent.Str("query_type", "query_dot")
+		logEvent.Str("query_type", "query_dot")
 		rmsg, err = queryDoT(r, &nameserver.DoT)
 	default:
-		_logEvent.Str("query_type", "query_dns")
+		logEvent.Str("query_type", "query_dns")
 		rmsg, err = queryDoD(r, &nameserver.Dns)
 	}
+	logEvent.Dur("latency_query", time.Since(queryStartTime))
 	// 4. cache response
 	if err == nil {
-		_logEvent.Str("rcode", dns.RcodeToString[r.Rcode])
+		logEvent.Str("rcode", dns.RcodeToString[r.Rcode])
 
 		if ok := cacheSetDnsMsg(rmsg, &config.Server.Cache); ok {
-			_logEvent.Str("cache", "update")
+			logEvent.Str("cache", "update")
 		}
 	} else {
-		_logEvent.Err(err)
+		logEvent.Err(err)
 		rmsg = new(dns.Msg)
 		rmsg.SetReply(r)
 		rmsg.Rcode = dns.RcodeServerFailure
 	}
 	replyUpdateName(rmsg, oldname)
-	_logEvent.Msg("")
 	return rmsg, err
 }
 

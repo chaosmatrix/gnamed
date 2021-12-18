@@ -63,7 +63,7 @@ $ gnamed
 * [ ] api: flush cache
 * [ ] api: dns query statistics
 * [ ] web: web ui make api easy use
-* [ ] optimization: blacklist/whitelist `contains` rule match algorithm
+* [ ] optimization: blacklist/whitelist `contains` rule match algorithm, Aho-Corasick or flashtext
 * [ ] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
 * [ ] optimization: log format and fields

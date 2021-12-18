@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -33,11 +34,12 @@ var (
 )
 
 type Config struct {
-	singleflightGroup *libnamed.Group `json:"-"`
-	Server            Server          `json:"server"`
-	Query             Query           `json:"query"`
-	Admin             Admin           `json:"admin"`
-	Files             Files           `json:"files"`
+	lock               *sync.Mutex                `json:"-"` // internal use, lazy init some values
+	singleflightGroups map[string]*libnamed.Group `json:"-"`
+	Server             Server                     `json:"server"`
+	Query              Query                      `json:"query"`
+	Admin              Admin                      `json:"admin"`
+	Files              Files                      `json:"files"`
 }
 
 type Server struct {
@@ -240,7 +242,8 @@ func parseConfig(fname string) (Config, error) {
 
 	cfg.Server.Main.verify()
 	if cfg.Server.Main.Singleflight {
-		cfg.singleflightGroup = new(libnamed.Group)
+		cfg.singleflightGroups = make(map[string]*libnamed.Group)
+		cfg.lock = new(sync.Mutex) // initialize global lock
 	}
 
 	fqdnQueryList(cfg.Query.BlackList)
@@ -297,8 +300,20 @@ func (l *Listen) parseListen() {
 	l.Timeout.parseTimeout()
 }
 
-func (cfg *Config) GetSingleFlightGroup() *libnamed.Group {
-	return cfg.singleflightGroup
+func (cfg *Config) GetSingleFlightGroup(qtype string) *libnamed.Group {
+	if group, found := cfg.singleflightGroups[qtype]; found {
+		return group
+	} else {
+		// make sure value only inittialize once
+		// make sure waiting concurrency caller get valid and correct value
+		cfg.lock.Lock()
+		// double check
+		if _, found := cfg.singleflightGroups[qtype]; !found {
+			cfg.singleflightGroups[qtype] = new(libnamed.Group)
+		}
+		cfg.lock.Unlock()
+		return cfg.singleflightGroups[qtype]
+	}
 }
 
 func (mf *Main) verify() bool {
