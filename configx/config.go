@@ -512,6 +512,7 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 			return "Contain", _contain, true
 		}
 	}
+	// O(m) * O(len(_ql.regexp))
 	for _, _regexp := range ql.regexp {
 		if _regexp.MatchString(name) {
 			return "Regexp", _regexp.String(), true

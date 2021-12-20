@@ -27,6 +27,7 @@ func handleDoHRequest(c *gin.Context) {
 	case "GET", "POST":
 		//
 	default:
+		logEvent.Int("status_code", http.StatusMethodNotAllowed)
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
 		logEvent.Dur("latency", time.Since(start)).Msg("")
 		return
@@ -49,7 +50,8 @@ func handleDoHRequest(c *gin.Context) {
 	logEvent.Dur("latency", time.Since(start)).Msg("")
 }
 
-func handleDoHRequestBadRequest(c *gin.Context) {
+func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
+	logEvent.Int("status_code", http.StatusBadRequest)
 	c.String(http.StatusBadRequest, "invalid message type\r\n")
 }
 
@@ -79,15 +81,15 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 
 	qname, found := c.GetQuery("name")
 	if !found {
-		logEvent.Err(errors.New("bad request"))
-		handleDoHRequestBadRequest(c)
+		logEvent.Err(errors.New("bad request, query_name name not found"))
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 	fqname := dns.Fqdn(qname)
 	qtype, found := c.GetQuery("type")
 	if !found {
-		logEvent.Err(errors.New("bad request"))
-		handleDoHRequestBadRequest(c)
+		logEvent.Err(errors.New("bad request, query_name type not found"))
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 	qtype = strings.ToUpper(qtype)
@@ -106,7 +108,7 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 	rmsg, err := queryx.Query(r, cfg, logEvent)
 	if err != nil {
 		logEvent.Err(err)
-		handleDoHRequestBadRequest(c)
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 
@@ -150,6 +152,7 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 	bs, err := json.Marshal(resp)
 	if err != nil {
 		logEvent.Err(err)
+		logEvent.Int("status_code", http.StatusInternalServerError)
 		c.String(http.StatusInternalServerError, "internal server error\r\n")
 		return
 	}
@@ -160,6 +163,7 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 		// Debug
 		c.Header("Content-Type", "application/json")
 	}
+	logEvent.Int("status_code", http.StatusOK)
 	c.String(http.StatusOK, string(bs))
 }
 
@@ -184,20 +188,22 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 	case "GET":
 		hexStr, found := c.GetQuery("dns")
 		if !found {
-			handleDoHRequestBadRequest(c)
+			logEvent.Err(errors.New("bad request, query_name dns not found"))
+			handleDoHRequestBadRequest(c, logEvent)
 			return
 		}
 		bs, err = hex.DecodeString(hexStr)
 	case "POST":
 		bs, err = c.GetRawData()
 	default:
+		logEvent.Int("status_code", http.StatusMethodNotAllowed)
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
 		return
 	}
 
 	if err != nil {
 		logEvent.Err(err)
-		handleDoHRequestBadRequest(c)
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 
@@ -205,26 +211,24 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 	err = r.Unpack(bs)
 	if err != nil {
 		logEvent.Err(err)
-
-		handleDoHRequestBadRequest(c)
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 	rmsg, err := queryx.Query(r, cfg, logEvent)
 	if err != nil {
 		logEvent.Err(err)
-
-		handleDoHRequestBadRequest(c)
+		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
 
 	bmsg, err := rmsg.Pack()
 	if err != nil {
-		logEvent.Err(err)
-
+		logEvent.Err(err).Int("status_code", http.StatusInternalServerError)
 		c.String(http.StatusInternalServerError, "internal server error\r\n")
 		return
 	}
 	c.Header("Content-Type", c.GetHeader("Accept"))
+	logEvent.Int("status_code", http.StatusOK)
 	c.String(http.StatusOK, string(bmsg))
 }
 
