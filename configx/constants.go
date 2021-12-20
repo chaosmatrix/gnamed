@@ -24,9 +24,10 @@ const (
 	DefaultPortDoH   = 443
 	DefaultPortAdmin = 6677
 
-	DefaultQueryTimeoutDurationConnect = 5 * time.Second
-	DefaultQueryTimeoutDurationRead    = 5 * time.Second
-	DefaultQueryTimeoutDurationWrite   = 5 * time.Second
+	DefaultTimeoutDurationIdle    = 60 * time.Second
+	DefaultTimeoutDurationConnect = 10 * time.Second
+	DefaultTimeoutDurationRead    = 10 * time.Second
+	DefaultTimeoutDurationWrite   = 10 * time.Second
 
 	DefaultDnsOptDnssec       = false
 	DefaultDnsOptEcs          = false

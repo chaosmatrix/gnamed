@@ -51,8 +51,9 @@ $ gnamed
 
 ### TODO-List
 * [x] server: dns protocol support
-* [ ] server: dns-over-https protocol support
+* [x] server: dns-over-https protocol support
 * [ ] server: dns-over-tls protocol support
+* [x] server: ensure singlefligh incoming query
 * [x] query: dns protocol support
 * [x] query: dns-over-https protocol support
 * [x] query: dns-over-tls protocol support
@@ -62,6 +63,12 @@ $ gnamed
 * [ ] api: flush cache
 * [ ] api: dns query statistics
 * [ ] web: web ui make api easy use
-* [ ] optimization: blacklist/whitelist `contains` rule match algorithm
+* [ ] optimization: blacklist/whitelist `contains` rule match algorithm, Aho-Corasick or flashtext
 * [ ] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
+* [ ] optimization: log format and fields
+
+## References
+### NameServers
+1. https://developers.cloudflare.com/1.1.1.1/
+2. https://my.nextdns.io/start

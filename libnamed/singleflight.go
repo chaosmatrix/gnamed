@@ -17,12 +17,16 @@ limitations under the License.
 
 package libnamed
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/miekg/dns"
+)
 
 // call is an in-flight or completed Do call
 type call struct {
 	wg  sync.WaitGroup
-	val interface{}
+	val *dns.Msg
 	err error
 }
 
@@ -37,7 +41,7 @@ type Group struct {
 // sure that only one execution is in-flight for a given key at a
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
-func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*call)
@@ -45,7 +49,8 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
 		c.wg.Wait()
-		return c.val, c.err
+		// caller might update value, need to do copy
+		return c.val.Copy(), true, c.err
 	}
 	c := new(call)
 	c.wg.Add(1)
@@ -59,5 +64,6 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	delete(g.m, key)
 	g.mu.Unlock()
 
-	return c.val, c.err
+	// if no concurrency flying request, it wast time to do deep copy
+	return c.val.Copy(), false, c.err
 }

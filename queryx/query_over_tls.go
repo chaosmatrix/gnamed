@@ -3,13 +3,16 @@ package queryx
 import (
 	"crypto/tls"
 	"gnamed/configx"
+	"gnamed/libnamed"
 
 	"github.com/miekg/dns"
 )
 
-func queryDoT(r *dns.Msg, dot *configx.DOTServer) error {
-	var err error
-	rmsg := r.Copy()
+func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
+	_logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoT)
+
+	_logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", "tcp-tls")
+
 	tlsConfig := &tls.Config{
 		ServerName: dot.TlsConfig.ServerName,
 	}
@@ -22,11 +25,15 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) error {
 		WriteTimeout:   dot.Timeout.WriteDuration,
 		SingleInflight: true,
 	}
-	resp, _, err := client.Exchange(rmsg, dot.Server)
+	resp, rtt, err := client.Exchange(r, dot.Server)
+	_logEvent.Dur("latency", rtt)
 	if err != nil {
-		return err
+		_logEvent.Err(err).Msg("")
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, err
 	}
-
-	reply(r, resp)
-	return nil
+	_logEvent.Msg("")
+	return resp, nil
 }

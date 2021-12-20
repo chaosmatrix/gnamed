@@ -2,7 +2,8 @@
     "server": {
         "main": {
             "logFile": "console:/dev/stderr",
-            "logLevel": "debug"
+            "logLevel": "trace",
+            "singleflight": true
         },
         "listen": [
             {"addr": "127.0.1.2:53", "network": "tcp", "protocol": "dns"},
@@ -49,7 +50,14 @@
             "A": {
                 "equal": [],
                 "prefix": [],
-                "suffix": ["adobe.io"],
+                "suffix": ["adobe.io."],
+                "contain": [".ad."],
+                "regexp": ["\\d{5,63}"]
+            },
+            "AAAA": {
+                "equal": [],
+                "prefix": [],
+                "suffix": ["adobe.io."],
                 "contain": [".ad."],
                 "regexp": ["\\d{5,63}"]
             }

@@ -2,6 +2,7 @@ package serverx
 
 import (
 	"gnamed/configx"
+	"gnamed/libnamed"
 	"sync"
 	"time"
 
@@ -10,25 +11,34 @@ import (
 	"github.com/miekg/dns"
 )
 
-func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
-	queryx.Query(r, cfg)
-	w.WriteMsg(r)
+func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
+	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS)
+	start := time.Now()
+	rmsg, err := queryx.Query(r, cfg, logEvent)
+	w.WriteMsg(rmsg)
+	logEvent.Err(err).Dur("latency", time.Since(start)).Msg("")
 }
 
 func serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func(addr string, network string) {
 		// TODO: handle error
-		serveDoDFunc(addr, network, handleRequest)
+		err := serveDoDFunc(&listen, handleDoDRequest)
+		if err != nil {
+			panic(err)
+		}
+		wg.Done()
 	}(listen.Addr, listen.Network)
 }
 
-func serveDoDFunc(addr string, network string, handleFunc func(dns.ResponseWriter, *dns.Msg)) error {
+func serveDoDFunc(listen *configx.Listen, handleFunc func(dns.ResponseWriter, *dns.Msg)) error {
 
 	dos := &dns.Server{
-		Addr:        addr,
-		Net:         network,
-		IdleTimeout: getIdleTimeout,
+		Addr:         listen.Addr,
+		Net:          listen.Network,
+		IdleTimeout:  getIdleTimeout,
+		ReadTimeout:  listen.Timeout.ConnectDuration,
+		WriteTimeout: listen.Timeout.WriteDuration,
 	}
 
 	dns.HandleFunc(".", handleFunc)
@@ -36,5 +46,5 @@ func serveDoDFunc(addr string, network string, handleFunc func(dns.ResponseWrite
 }
 
 func getIdleTimeout() time.Duration {
-	return 5 * time.Second
+	return 10 * time.Second
 }

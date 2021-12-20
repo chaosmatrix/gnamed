@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"gnamed/libnamed"
 	"io/ioutil"
+	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -31,10 +34,12 @@ var (
 )
 
 type Config struct {
-	Server Server `json:"server"`
-	Query  Query  `json:"query"`
-	Admin  Admin  `json:"admin"`
-	Files  Files  `json:"files"`
+	lock               *sync.Mutex                `json:"-"` // internal use, lazy init some values
+	singleflightGroups map[string]*libnamed.Group `json:"-"`
+	Server             Server                     `json:"server"`
+	Query              Query                      `json:"query"`
+	Admin              Admin                      `json:"admin"`
+	Files              Files                      `json:"files"`
 }
 
 type Server struct {
@@ -54,6 +59,8 @@ type Main struct {
 	// unix:/path/syslog.socket
 	LogFile  string `json:"logFile"`
 	LogLevel string `json:"logLevel"`
+
+	Singleflight bool `json:"singleflight"`
 }
 
 // Server -> Listen
@@ -61,7 +68,9 @@ type Listen struct {
 	Addr      string    `json:"addr"`
 	Network   string    `json:"network"`
 	Protocol  string    `json:"protocol"`
+	DohPath   string    `json:"doh_path"` // doh path, default "/dns-query"
 	TlsConfig TlsConfig `json:"tls_config"`
+	Timeout   Timeout   `json:"timeout"`
 }
 
 type TlsConfig struct {
@@ -87,8 +96,12 @@ type DODServer struct {
 
 type DOHMsgType string
 
-const DOHMsgTypeRFC8484 DOHMsgType = "RFC8484"
-const DOHMsgTypeJSON DOHMsgType = "JSON"
+const (
+	DOHMsgTypeRFC8484          DOHMsgType = "RFC8484"
+	DOHMsgTypeJSON             DOHMsgType = "JSON"
+	DOHAccetpHeaderTypeRFC8484            = "application/dns-message"
+	DOHAcceptHeaderTypeJSON               = "application/dns-json"
+)
 
 type DOHServer struct {
 	Url     string              `json:"url"`
@@ -117,6 +130,8 @@ type DOTServer struct {
 }
 
 type Timeout struct {
+	Idle            string        `json:"idle"`
+	IdleDuration    time.Duration `json:"-"`
 	Connect         string        `json:"connect"`
 	ConnectDuration time.Duration `json:"-"` // hidden field, ignore encode/decode
 	Read            string        `json:"read"`
@@ -201,6 +216,10 @@ func parseConfig(fname string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+
+	for i, _ := range cfg.Server.Listen {
+		cfg.Server.Listen[i].parseListen()
+	}
 	// TODO: additional check
 	if !verifyViewNameServerTag(&cfg.Server) {
 		return cfg, errors.New("some View's has invalid nameserver_tag")
@@ -222,6 +241,10 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	cfg.Server.Main.verify()
+	if cfg.Server.Main.Singleflight {
+		cfg.singleflightGroups = make(map[string]*libnamed.Group)
+		cfg.lock = new(sync.Mutex) // initialize global lock
+	}
 
 	fqdnQueryList(cfg.Query.BlackList)
 	fqdnQueryList(cfg.Query.WhiteList)
@@ -235,6 +258,64 @@ func parseConfig(fname string) (Config, error) {
 	return cfg, err
 }
 
+func (l *Listen) parseListen() {
+
+	ip, port, err := net.SplitHostPort(l.Addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' invalid, error: '%s'\n", l.Addr, err)
+		panic(err)
+	}
+	portInt, err := strconv.Atoi(port)
+	if err != nil || portInt > 65536 || portInt <= 0 {
+		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' has invalid port, error: '%s'\n", l.Addr, err)
+		panic(err)
+	}
+	if _ip := net.ParseIP(ip); _ip == nil {
+		err := fmt.Errorf("listen addr '%s' invalid", l.Addr)
+		fmt.Fprintf(os.Stderr, "[+] %s\n", err)
+		panic(err)
+	}
+	switch l.Protocol {
+	case ProtocolTypeDNS:
+		switch l.Network {
+		case NetworkTypeTcp, NetworkTypeUdp:
+			//
+		default:
+			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
+			fmt.Fprintf(os.Stderr, "[+] %s\n", err)
+			panic(err)
+		}
+	case ProtocolTypeDoH, ProtocolTypeDoT:
+		switch l.Network {
+		case NetworkTypeTcp:
+			//
+		default:
+			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
+			fmt.Fprintf(os.Stderr, "[+] %s\n", err)
+			panic(err)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' protocol '%s' not support\n", l.Addr, l.Protocol)
+	}
+	l.Timeout.parseTimeout()
+}
+
+func (cfg *Config) GetSingleFlightGroup(qtype string) *libnamed.Group {
+	if group, found := cfg.singleflightGroups[qtype]; found {
+		return group
+	} else {
+		// make sure value only inittialize once
+		// make sure waiting concurrency caller get valid and correct value
+		cfg.lock.Lock()
+		// double check
+		if _, found := cfg.singleflightGroups[qtype]; !found {
+			cfg.singleflightGroups[qtype] = new(libnamed.Group)
+		}
+		cfg.lock.Unlock()
+		return cfg.singleflightGroups[qtype]
+	}
+}
+
 func (mf *Main) verify() bool {
 	if mf.LogLevel == "" {
 		mf.LogLevel = zerolog.DebugLevel.String()
@@ -245,27 +326,23 @@ func (mf *Main) verify() bool {
 func (t *Timeout) parseTimeout() {
 	_logFunc := func(s string, err error) {
 		if s != "" && err != nil {
-			fmt.Fprintf(os.Stderr, "[+] invalid timeout: '%s', error: '%v'\n", s, err)
+			fmt.Fprintf(os.Stderr, "[+] invalid timeout: '%s', error: '%v', set as default\n", s, err)
 		}
 	}
-	if d, err := time.ParseDuration(t.Connect); err == nil {
-		t.ConnectDuration = d
-	} else {
-		_logFunc(t.Connect, err)
-		t.ConnectDuration = DefaultQueryTimeoutDurationConnect
+
+	setDuration := func(durationField *time.Duration, durationString string, defaultDuration time.Duration) {
+		if d, err := time.ParseDuration(durationString); err == nil {
+			*durationField = d
+		} else {
+			_logFunc(durationString, err)
+			*durationField = defaultDuration
+		}
 	}
-	if d, err := time.ParseDuration(t.Read); err == nil {
-		t.ReadDuration = d
-	} else {
-		_logFunc(t.Read, err)
-		t.ReadDuration = DefaultQueryTimeoutDurationRead
-	}
-	if d, err := time.ParseDuration(t.Write); err == nil {
-		t.WriteDuration = d
-	} else {
-		_logFunc(t.Write, err)
-		t.WriteDuration = DefaultQueryTimeoutDurationWrite
-	}
+
+	setDuration(&t.IdleDuration, t.Idle, DefaultTimeoutDurationIdle)
+	setDuration(&t.ConnectDuration, t.Connect, DefaultTimeoutDurationConnect)
+	setDuration(&t.ReadDuration, t.Read, DefaultTimeoutDurationRead)
+	setDuration(&t.WriteDuration, t.Write, DefaultTimeoutDurationWrite)
 }
 
 func verifyViewNameServerTag(srv *Server) bool {
@@ -428,6 +505,8 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 		return QueryListTypePrefix, rule, found
 	}
 	// len(ql.Contain) * O(avg(len(_contain)))
+	// Optimization: Aho-Corasick or flashtext
+	// flashtext https://arxiv.org/pdf/1711.00046.pdf
 	for _, _contain := range ql.Contain {
 		if strings.Contains(name, _contain) {
 			return "Contain", _contain, true
