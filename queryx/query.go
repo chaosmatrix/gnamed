@@ -46,11 +46,13 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	key := strings.ToLower(origName)
 
 	rmsg, hit, err := singleflightGroup.Do(key, f)
-
+	logEvent.Str("key", key).Bool("singleflight", hit)
+	if err != nil {
+		return rmsg, err
+	}
 	// query() make sure rmsg not nil, and always a valid *dns.Msg
 	replyUpdateName(rmsg, origName)
 
-	logEvent.Str("key", key).Bool("singleflight", hit)
 	// NOTICE: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
 	// singleflight already make sure do deep copy, return values are concurrency safe.
 	if hit {
@@ -75,7 +77,6 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	name := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 
-	logEvent.Str("name", name)
 	// Filter
 	// 1. validate domain
 	if !libnamed.ValidateDomain(name) {
@@ -125,16 +126,14 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	logEvent.Str("nameserver_tag", dnsTag)
 
 	if nameserver == nil {
-		// FIXME: reply from hosts file
+		// reply from hosts file
 		_record, _ := config.Server.FindRecordFromHosts(r.Question[0].Name, dns.TypeToString[r.Question[0].Qtype])
 		_msg := strings.Join([]string{name, "60", "IN", qtype, _record}, "    ")
 
 		logEvent.Str("query_type", "hosts")
 		_rr, _err := dns.NewRR(_msg)
 		if _err != nil {
-			logEvent.Err(err)
-			// FIXME
-			return oldMsg, _err
+			return nil, _err
 		}
 		oldMsg.Answer = []dns.RR{_rr}
 		return oldMsg, nil
@@ -142,6 +141,8 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 
 	rmsg := new(dns.Msg)
 	rmsg.SetReply(r)
+
+	logEvent.Str("qname", rmsg.Question[0].Name)
 
 	queryStartTime := time.Now()
 	switch nameserver.Protocol {
@@ -167,10 +168,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 			logEvent.Str("cache", "update")
 		}
 	} else {
-		logEvent.Err(err)
-		rmsg = new(dns.Msg)
-		rmsg.SetReply(r)
-		rmsg.Rcode = dns.RcodeServerFailure
+		return nil, err
 	}
 	replyUpdateName(rmsg, oldname)
 	return rmsg, err

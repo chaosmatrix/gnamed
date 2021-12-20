@@ -3,6 +3,7 @@ package serverx
 import (
 	"gnamed/configx"
 	"gnamed/libnamed"
+	"net"
 	"sync"
 	"time"
 
@@ -12,11 +13,18 @@ import (
 )
 
 func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
-	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS)
+	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
+	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
 	start := time.Now()
 	rmsg, err := queryx.Query(r, cfg, logEvent)
-	w.WriteMsg(rmsg)
-	logEvent.Err(err).Dur("latency", time.Since(start)).Msg("")
+	if err != nil {
+		logEvent.Err(err).Dur("latency", time.Since(start))
+		err = w.Close()
+		logEvent.AnErr("server_error", err).Msg("")
+	} else {
+		err = w.WriteMsg(rmsg)
+		logEvent.Err(err).Dur("latency", time.Since(start)).Msg("")
+	}
 }
 
 func serveDoD(listen configx.Listen, wg *sync.WaitGroup) {

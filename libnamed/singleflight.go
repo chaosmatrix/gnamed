@@ -50,6 +50,9 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 		g.mu.Unlock()
 		c.wg.Wait()
 		// caller might update value, need to do copy
+		if c.err != nil {
+			return c.val, true, c.err
+		}
 		return c.val.Copy(), true, c.err
 	}
 	c := new(call)
@@ -65,5 +68,8 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 	g.mu.Unlock()
 
 	// if no concurrency flying request, it wast time to do deep copy
+	if c.err != nil {
+		return c.val, false, c.err
+	}
 	return c.val.Copy(), false, c.err
 }
