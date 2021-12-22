@@ -20,7 +20,7 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	if r == nil {
 		err = errors.New("invalid dns message")
 		libnamed.Logger.Error().Err(err).Msgf("%v", r)
-		return new(dns.Msg), err
+		return nil, err
 	}
 	if len(r.Question) == 0 {
 		err = errors.New("dns message hasn't valid question")
@@ -50,22 +50,12 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	if err != nil {
 		return rmsg, err
 	}
-	// query() make sure rmsg not nil, and always a valid *dns.Msg
-	replyUpdateName(rmsg, origName)
 
 	// NOTICE: two dns msg has same question not equal same dns msg, they minght has different flags or some others.
 	// singleflight already make sure do deep copy, return values are concurrency safe.
 	if hit {
-		// return from prev copy
-		rcode := rmsg.Rcode
-		rmsg.SetReply(r)
-		rmsg.Rcode = rcode
-		// Fix OPT PSEUDOSECTION COOKIE
-		if opt := r.IsEdns0(); opt != nil {
-			if ropt := rmsg.IsEdns0(); ropt != nil {
-				*ropt = *opt
-			}
-		}
+		// return from prev copy, need to make sure update name
+		setReply(rmsg, r, origName)
 		return rmsg, err
 	}
 	return rmsg, err
@@ -74,75 +64,67 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Msg, error) {
 	var err error
 
-	name := r.Question[0].Name
+	origName := r.Question[0].Name
+	qname := origName
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 
 	// Filter
 	// 1. validate domain
-	if !libnamed.ValidateDomain(name) {
-		logEvent.Str("query_type", "query_fake").Err(errors.New("invalid domain base on RFC 1035 and RFC 3696"))
-		return queryFake(r, nil)
+	if !libnamed.ValidateDomain(origName) {
+		r.SetReply(r)
+		r.Rcode = dns.RcodeFormatError
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode]).Err(errors.New("invalid domain base on RFC 1035 and RFC 3696"))
+		return r, err
 	}
 
 	// Cache
 	// 0. lock - ensure single flying query or internal search
 	// 1. whitelist/blacklist search
-	if _r, _s, _forbidden := config.Query.QueryForbidden(name, qtype); _forbidden {
-		logEvent.Str("query_type", "query_fake").Str("blacklist", _r+"_"+_s)
-		return queryFake(r, nil)
+	if _r, _s, _forbidden := config.Query.QueryForbidden(origName, qtype); _forbidden {
+		rmsg, err := queryFake(r, nil)
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", _r+"_"+_s)
+		return rmsg, err
 	}
 
-	// handle cname
-	oldname := name
-	oldMsg := new(dns.Msg)
-	oldMsg.SetReply(r)
-
-	cname, vname := config.Server.FindRealName(name)
+	cname, vname := config.Server.FindRealName(origName)
 	logEvent.Str("view_name", vname)
-	if len(cname) != 0 && cname != name {
-		name = cname
+	if cname != qname {
+		qname = cname
 		logEvent.Str("cname", cname)
 		for i, _ := range r.Question {
 			r.Question[i].Name = cname
 		}
 	}
 
+	logEvent.Str("qname", qname)
+
 	// 2. cache search
 	if rmsg, found := cacheGetDnsMsg(r); found {
-		if oldname != name {
-			replyUpdateName(rmsg, oldname)
-		}
-		logEvent.Str("query_type", "").Str("cache", "hit")
-		// Fix OPT PSEUDOSECTION COOKIE
-		if opt := r.IsEdns0(); opt != nil {
-			if ropt := rmsg.IsEdns0(); ropt != nil {
-				*ropt = *opt
-			}
-		}
+		logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("cache", "hit")
+		setReply(rmsg, r, origName)
 		return rmsg, nil
 	}
 	// 3. external query
-	dnsTag, nameserver := config.Server.FindNameServer(r.Question[0].Name)
+	dnsTag, nameserver := config.Server.FindNameServer(qname)
 	logEvent.Str("nameserver_tag", dnsTag)
 
 	if nameserver == nil {
 		// reply from hosts file
-		_record, _ := config.Server.FindRecordFromHosts(r.Question[0].Name, dns.TypeToString[r.Question[0].Qtype])
-		_msg := strings.Join([]string{name, "60", "IN", qtype, _record}, "    ")
+		_record, _ := config.Server.FindRecordFromHosts(qname, qtype)
+		_msg := strings.Join([]string{origName, "60", "IN", qtype, _record}, "    ")
 
 		logEvent.Str("query_type", "hosts")
+		rmsg := new(dns.Msg)
 		_rr, _err := dns.NewRR(_msg)
 		if _err != nil {
 			return nil, _err
 		}
-		oldMsg.Answer = []dns.RR{_rr}
-		return oldMsg, nil
+		rmsg.Answer = []dns.RR{_rr}
+		setReply(rmsg, r, origName)
+		return rmsg, nil
 	}
 
-	rmsg := new(dns.Msg)
-	rmsg.SetReply(r)
-
-	logEvent.Str("qname", rmsg.Question[0].Name)
+	var rmsg *dns.Msg
 
 	queryStartTime := time.Now()
 	switch nameserver.Protocol {
@@ -162,7 +144,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 	// 4. cache response
 	if err == nil {
-		logEvent.Str("rcode", dns.RcodeToString[r.Rcode])
+		logEvent.Str("rcode", dns.RcodeToString[rmsg.Rcode])
 
 		if ok := cacheSetDnsMsg(rmsg, &config.Server.Cache); ok {
 			logEvent.Str("cache", "update")
@@ -170,7 +152,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	} else {
 		return nil, err
 	}
-	replyUpdateName(rmsg, oldname)
+	setReply(rmsg, r, origName)
 	return rmsg, err
 }
 
@@ -230,15 +212,6 @@ func cacheGetDnsMsg(r *dns.Msg) (*dns.Msg, bool) {
 			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("name", name).Uint16("qtype", qtype).Err(err).Msg("")
 			return nil, false
 		}
-		/*
-			resp.RecursionAvailable = r.RecursionDesired
-			r.Answer = resp.Copy().Answer
-			r.Ns = resp.Copy().Copy().Ns
-			r.Extra = resp.Copy().Extra
-			r.Rcode = resp.Copy().Rcode
-			r.RecursionAvailable = r.RecursionDesired
-		*/
-		resp.SetReply(r)
 		return resp, true
 	}
 
@@ -277,7 +250,7 @@ func replyUpdateName(r *dns.Msg, oldname string) {
 	}
 }
 
-func setReply(resp *dns.Msg, r *dns.Msg) {
+func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 	rcode := resp.Rcode
 	resp.SetReply(r)
 	resp.Rcode = rcode
@@ -289,4 +262,5 @@ func setReply(resp *dns.Msg, r *dns.Msg) {
 			*ropt = *opt
 		}
 	}
+	replyUpdateName(resp, oldName)
 }

@@ -27,10 +27,11 @@ var (
 	defaultCachePolity   = CachePolicyRepectTtl
 
 	// QueryList Type
-	QueryListTypeEqual  = "Equal"
-	QueryListTypePrefix = "Prefix"
-	QueryListTypeSuffix = "Suffix"
-	QueryListTypeRegexp = "Regexp"
+	QueryListTypeEqual   = "Equal"
+	QueryListTypePrefix  = "Prefix"
+	QueryListTypeSuffix  = "Suffix"
+	QueryListTypeContain = "Contain"
+	QueryListTypeRegexp  = "Regexp"
 )
 
 type Config struct {
@@ -301,6 +302,7 @@ func (l *Listen) parseListen() {
 }
 
 func (cfg *Config) GetSingleFlightGroup(qtype string) *libnamed.Group {
+	// only inittialize once, concurrency safe ?
 	if group, found := cfg.singleflightGroups[qtype]; found {
 		return group
 	} else {
@@ -498,7 +500,7 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 	}
 	// O(m)
 	if rule, found := ql.suffixTrie.Query(name); found {
-		return QueryListTypePrefix, rule, found
+		return QueryListTypeSuffix, rule, found
 	}
 	// O(m)
 	if rule, found := ql.prefixTrie.Query(name); found {
@@ -509,43 +511,13 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 	// flashtext https://arxiv.org/pdf/1711.00046.pdf
 	for _, _contain := range ql.Contain {
 		if strings.Contains(name, _contain) {
-			return "Contain", _contain, true
+			return QueryListTypeContain, _contain, true
 		}
 	}
 	// O(m) * O(len(_ql.regexp))
 	for _, _regexp := range ql.regexp {
 		if _regexp.MatchString(name) {
-			return "Regexp", _regexp.String(), true
-		}
-	}
-	return "", "", false
-}
-
-// Deprecated
-func (ql *QueryList) MatchDeprecated(name string) (string, string, bool) {
-	for _, _equal := range ql.Equal {
-		if name == _equal {
-			return "Equal", _equal, true
-		}
-	}
-	for _, _prefix := range ql.Prefix {
-		if strings.HasPrefix(name, _prefix) {
-			return "Prefix", _prefix, true
-		}
-	}
-	for _, _suffix := range ql.Suffix {
-		if strings.HasSuffix(name, _suffix) {
-			return "Suffix", _suffix, true
-		}
-	}
-	for _, _contain := range ql.Contain {
-		if strings.Contains(name, _contain) {
-			return "Contain", _contain, true
-		}
-	}
-	for _, _regexp := range ql.regexp {
-		if _regexp.MatchString(name) {
-			return "Regexp", _regexp.String(), true
+			return QueryListTypeRegexp, _regexp.String(), true
 		}
 	}
 	return "", "", false
