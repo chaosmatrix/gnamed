@@ -86,6 +86,11 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 		return
 	}
 	fqname := dns.Fqdn(qname)
+	if !libnamed.ValidateDomain(fqname) {
+		logEvent.Err(errors.New("bad request, invalid domain"))
+		handleDoHRequestBadRequest(c, logEvent)
+		return
+	}
 	qtype, found := c.GetQuery("type")
 	if !found {
 		logEvent.Err(errors.New("bad request, query_name type not found"))
@@ -93,12 +98,17 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 		return
 	}
 	qtype = strings.ToUpper(qtype)
-	qtypeInt := dns.StringToType[qtype]
+	qtypeNum, found := dns.StringToType[qtype]
+	if !found {
+		logEvent.Err(errors.New("bad request, invalid dns type"))
+		handleDoHRequestBadRequest(c, logEvent)
+		return
+	}
 
 	r := new(dns.Msg)
 	q := dns.Question{
 		Name:   fqname,
-		Qtype:  qtypeInt,
+		Qtype:  qtypeNum,
 		Qclass: dns.ClassINET,
 	}
 	r.Id = dns.Id()
@@ -121,7 +131,7 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 		CD:     rmsg.CheckingDisabled,
 		Question: []libnamed.DOHJsonQuestion{{
 			Name: qname,
-			Type: qtypeInt,
+			Type: qtypeNum,
 		}},
 	}
 

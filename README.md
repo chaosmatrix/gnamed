@@ -53,7 +53,7 @@ $ gnamed
 * [x] server: dns protocol support
 * [x] server: dns-over-https protocol support
 * [ ] server: dns-over-tls protocol support
-* [x] server: ensure singlefligh incoming query
+* [x] server: ensure singleflight incoming query
 * [x] query: dns protocol support
 * [x] query: dns-over-https protocol support
 * [x] query: dns-over-tls protocol support
