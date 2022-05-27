@@ -14,18 +14,27 @@ var (
 )
 
 func Serve(config *configx.Config, wg *sync.WaitGroup) {
+	// init golbal
 	cfg = config
 
-	for _, _listen := range config.Server.Listen {
-		_logger := libnamed.Logger.Trace().Str("log_type", "server").Str("address", _listen.Addr).Str("network", _listen.Network).Str("protocol", _listen.Protocol)
-		switch _listen.Protocol {
+	sls := cfg.Server.Listen
+
+	for i := 0; i < len(sls); i++ {
+		logEvent := libnamed.Logger.Trace().Str("log_type", "server").Str("address", sls[i].Addr).Str("network", sls[i].Network).Str("protocol", sls[i].Protocol)
+		switch sls[i].Protocol {
 		case configx.ProtocolTypeDNS:
-			serveDoD(_listen, wg)
+			serveDoD(sls[i], wg)
 		case configx.ProtocolTypeDoH:
-			serveDoH(_listen, wg)
+			serveDoH(sls[i], wg)
 		default:
-			_logger.Err(ErrServerProtocolUnsupport)
+			logEvent.Err(ErrServerProtocolUnsupport)
 		}
-		_logger.Msg("")
+		logEvent.Msg("")
+	}
+
+	als := cfg.Admin.Listen
+	for i := 0; i < len(als); i++ {
+		serveAdmin(als[i], wg)
+		libnamed.Logger.Trace().Str("log_type", "admin").Str("address", als[i].Addr).Str("network", als[i].Network).Str("protocol", als[i].Protocol).Msg("")
 	}
 }

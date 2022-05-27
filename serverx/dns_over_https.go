@@ -18,15 +18,13 @@ import (
 )
 
 func handleDoHRequest(c *gin.Context) {
+	start := time.Now()
+
 	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
 
-	logEvent.Str("clientip", c.ClientIP()).Str("method", c.Request.Method).Str("accept", c.GetHeader("Accept"))
+	logEvent.Str("clientip", c.ClientIP()).Str("method", c.Request.Method).Str("accept", c.GetHeader("Accept")).Str("uri", c.Request.URL.RequestURI())
 
-	start := time.Now()
-	switch c.Request.Method {
-	case "GET", "POST":
-		//
-	default:
+	if c.Request.Method != "GET" && c.Request.Method != "POST" {
 		logEvent.Int("status_code", http.StatusMethodNotAllowed)
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
 		logEvent.Dur("latency", time.Since(start)).Msg("")
@@ -243,7 +241,9 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 }
 
 func serveDoHFunc(listen configx.Listen) {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Logger(), gin.Recovery())
+
 	if listen.DohPath == "" {
 		r.GET("/dns-query", handleDoHRequest)
 		r.POST("/dns-query", handleDoHRequest)

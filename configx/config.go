@@ -21,10 +21,6 @@ import (
 type CachePolicyType string
 
 var (
-	// cache.policy
-	CachePolicyRepectTtl = "respectTtl" // respect dns protocol's ttl
-	CachePolicyStableTtl = "stableTtl"  // stable ttl in configuration file
-	defaultCachePolity   = CachePolicyRepectTtl
 
 	// QueryList Type
 	QueryListTypeEqual   = "Equal"
@@ -35,12 +31,12 @@ var (
 )
 
 type Config struct {
-	lock               *sync.Mutex                `json:"-"` // internal use, lazy init some values
-	singleflightGroups map[string]*libnamed.Group `json:"-"`
-	Server             Server                     `json:"server"`
-	Query              Query                      `json:"query"`
-	Admin              Admin                      `json:"admin"`
-	Files              Files                      `json:"files"`
+	lock               *sync.Mutex       `json:"-"` // internal use, lazy init some values
+	singleflightGroups []*libnamed.Group `json:"-"` // max size 1<<16
+	Server             Server            `json:"server"`
+	Query              Query             `json:"query"`
+	Admin              Admin             `json:"admin"`
+	Files              Files             `json:"files"`
 }
 
 type Server struct {
@@ -167,6 +163,7 @@ type Cache struct {
 	MaxTTL       uint32 `json:"maxTTL"`
 	MinTTL       uint32 `json:"minTTL"`
 	ScanInterval string `json:"scanInterval"`
+	Mode         string `json:"mode"`
 }
 
 // Query
@@ -218,7 +215,7 @@ func parseConfig(fname string) (Config, error) {
 		return cfg, err
 	}
 
-	for i, _ := range cfg.Server.Listen {
+	for i := 0; i < len(cfg.Server.Listen); i++ {
 		cfg.Server.Listen[i].parseListen()
 	}
 	// TODO: additional check
@@ -227,25 +224,29 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	// view -> FQDN
-	for _vk, _vv := range cfg.Server.View {
-		if _vv.Cname != "" {
-			_vv.Cname = dns.Fqdn(_vv.Cname)
+	for vk, vv := range cfg.Server.View {
+		if vv.Cname != "" {
+			vv.Cname = dns.Fqdn(vv.Cname)
 		}
-		_vkFqdn := dns.Fqdn(_vk)
-		if _vkFqdn != _vk {
-			delete(cfg.Server.View, _vk)
+		vkFqdn := dns.Fqdn(vk)
+		if vkFqdn != vk {
+			delete(cfg.Server.View, vk)
 		}
-		cfg.Server.View[_vkFqdn] = _vv
+		cfg.Server.View[vkFqdn] = vv
 	}
-	for _i, _ := range cfg.Server.Hosts {
-		cfg.Server.Hosts[_i].Name = dns.Fqdn(cfg.Server.Hosts[_i].Name)
+	for i := 0; i < len(cfg.Server.Hosts); i++ {
+		cfg.Server.Hosts[i].Name = dns.Fqdn(cfg.Server.Hosts[i].Name)
 	}
 
 	cfg.Server.Main.verify()
 	if cfg.Server.Main.Singleflight {
-		cfg.singleflightGroups = make(map[string]*libnamed.Group)
+		cfg.singleflightGroups = make([]*libnamed.Group, 1<<16)
 		cfg.lock = new(sync.Mutex) // initialize global lock
 	}
+
+	// verify and defaulting cache configuration options
+
+	verifyDefaultingCache(&cfg.Server.Cache)
 
 	fqdnQueryList(cfg.Query.BlackList)
 	fqdnQueryList(cfg.Query.WhiteList)
@@ -256,7 +257,30 @@ func parseConfig(fname string) (Config, error) {
 	contructQueryList(cfg.Query.BlackList)
 	contructQueryList(cfg.Query.WhiteList)
 
+	// admin cidr
+	for i := 0; i < len(cfg.Admin.Auth.Cidr); i++ {
+		if j := strings.LastIndex(cfg.Admin.Auth.Cidr[i], "/"); j < 0 {
+			cfg.Admin.Auth.Cidr[i] += "/32"
+		}
+
+		if _, _cidr, _err := net.ParseCIDR(cfg.Admin.Auth.Cidr[i]); _err == nil {
+			cfg.Admin.Auth.Cidr[i] = _cidr.String()
+		} else {
+			fmt.Fprintf(os.Stderr, "[+] invalid cidr %s\n", cfg.Admin.Auth.Cidr[i])
+			err = _err
+		}
+	}
+
 	return cfg, err
+}
+
+func verifyDefaultingCache(c *Cache) {
+	if c.Mode == "" {
+		c.Mode = CacheModeSkipList
+	} else if c.Mode != CacheModeSkipList && c.Mode != CacheModeHashTable {
+		fmt.Fprintf(os.Stderr, "[+] invalid cache mode '%s' not in %v\n", c.Mode, []string{CacheModeSkipList, CacheModeHashTable})
+		panic(errors.New("invalid cache mode"))
+	}
 }
 
 func (l *Listen) parseListen() {
@@ -268,12 +292,10 @@ func (l *Listen) parseListen() {
 	}
 	portInt, err := strconv.Atoi(port)
 	if err != nil || portInt > 65536 || portInt <= 0 {
-		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' has invalid port, error: '%s'\n", l.Addr, err)
-		panic(err)
+		panic(fmt.Errorf("listen addr '%s' has invalid port, error: '%s'", l.Addr, err))
 	}
 	if _ip := net.ParseIP(ip); _ip == nil {
 		err := fmt.Errorf("listen addr '%s' invalid", l.Addr)
-		fmt.Fprintf(os.Stderr, "[+] %s\n", err)
 		panic(err)
 	}
 	switch l.Protocol {
@@ -283,7 +305,6 @@ func (l *Listen) parseListen() {
 			//
 		default:
 			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-			fmt.Fprintf(os.Stderr, "[+] %s\n", err)
 			panic(err)
 		}
 	case ProtocolTypeDoH, ProtocolTypeDoT:
@@ -292,30 +313,29 @@ func (l *Listen) parseListen() {
 			//
 		default:
 			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-			fmt.Fprintf(os.Stderr, "[+] %s\n", err)
 			panic(err)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' protocol '%s' not support\n", l.Addr, l.Protocol)
+		err := fmt.Errorf("listen addr '%s' protocol '%s' not support", l.Addr, l.Protocol)
+		panic(err)
 	}
 	l.Timeout.parseTimeout()
 }
 
-func (cfg *Config) GetSingleFlightGroup(qtype string) *libnamed.Group {
-	// only inittialize once, concurrency safe ?
-	if group, found := cfg.singleflightGroups[qtype]; found {
-		return group
-	} else {
+func (cfg *Config) GetSingleFlightGroup(qtype uint16) *libnamed.Group {
+	if cfg.singleflightGroups[qtype] == nil {
+		// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
 		// make sure value only inittialize once
 		// make sure waiting concurrency caller get valid and correct value
 		cfg.lock.Lock()
-		// double check
-		if _, found := cfg.singleflightGroups[qtype]; !found {
+		if cfg.singleflightGroups[qtype] == nil {
+			// double check
 			cfg.singleflightGroups[qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
-		return cfg.singleflightGroups[qtype]
 	}
+
+	return cfg.singleflightGroups[qtype]
 }
 
 func (mf *Main) verify() bool {

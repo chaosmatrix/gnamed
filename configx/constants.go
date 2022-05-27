@@ -19,6 +19,9 @@ const (
 	CachePolicyTypeHardCode  = "cache-hardcode"
 	CachePolicyTypeTtl       = "cache-ttl"
 
+	CacheModeSkipList  = "skiplist"
+	CacheModeHashTable = "hashtable"
+
 	DefaultPortDns   = 53
 	DefaultPortDoT   = 853
 	DefaultPortDoH   = 443
