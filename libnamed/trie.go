@@ -35,18 +35,26 @@ func newSuffixTrie(words []string) *SuffixTrie {
 	}
 
 	for _, word := range words {
-		curr := t.root
-		for i := len(word) - 1; i >= 0; i-- {
-			b := word[i]
-			if _, found := curr.next[b]; !found {
-				curr.next[b] = &node{next: make(map[byte]*node)}
-			}
-			curr = curr.next[b]
-		}
-		//curr.word = true
-		curr.next['$'] = nil
+		t.add(word)
 	}
 	return t
+}
+
+func (t *SuffixTrie) Add(word string) {
+	t.add(word)
+}
+
+func (t *SuffixTrie) add(word string) {
+	curr := t.root
+	for i := len(word) - 1; i >= 0; i-- {
+		b := word[i]
+		if _, found := curr.next[b]; !found {
+			curr.next[b] = &node{next: make(map[byte]*node)}
+		}
+		curr = curr.next[b]
+	}
+	//curr.word = true
+	curr.next['$'] = nil
 }
 
 func (t *SuffixTrie) Query(word string) (string, bool) {
@@ -87,18 +95,26 @@ func newPrefixTrie(words []string) *PrefixTrie {
 	}
 
 	for _, word := range words {
-		curr := t.root
-		for i := 0; i < len(word); i++ {
-			b := word[i]
-			if _, found := curr.next[b]; !found {
-				curr.next[b] = &node{next: make(map[byte]*node)}
-			}
-			curr = curr.next[b]
-		}
-		//curr.word = true
-		curr.next['$'] = nil
+		t.add(word)
 	}
 	return t
+}
+
+func (t *PrefixTrie) Add(word string) {
+	t.add(word)
+}
+
+func (t *PrefixTrie) add(word string) {
+	curr := t.root
+	for i := 0; i < len(word); i++ {
+		b := word[i]
+		if _, found := curr.next[b]; !found {
+			curr.next[b] = &node{next: make(map[byte]*node)}
+		}
+		curr = curr.next[b]
+	}
+	//curr.word = true
+	curr.next['$'] = nil
 }
 
 func (t *PrefixTrie) Query(word string) (string, bool) {

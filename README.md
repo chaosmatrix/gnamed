@@ -59,14 +59,17 @@ $ gnamed
 * [x] query: dns-over-tls protocol support
 * [ ] query: flexible view match rules, for example 'contains'
 * [ ] cache: delete expired cache actively
-* [ ] reply: update ttl when response from cache
-* [ ] api: flush cache
+* [x] reply: update ttl when response from cache
+* [ ] api: cache operations: delete/flush
 * [ ] api: dns query statistics
+* [ ] api: update blacklist/whitelist
 * [ ] web: web ui make api easy use
+* [ ] doc: openapi https://github.com/swaggo/swag#how-to-use-it-with-gin
 * [ ] optimization: blacklist/whitelist `contains` rule match algorithm, Aho-Corasick or flashtext
 * [ ] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
 * [ ] optimization: log format and fields
+* [ ] optimization: algorithm to get dns response cache ttl
 
 ## References
 ### NameServers

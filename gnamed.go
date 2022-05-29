@@ -9,6 +9,7 @@ import (
 	"gnamed/serverx"
 	"strings"
 	"sync"
+	"time"
 
 	"gnamed/configx"
 )
@@ -46,6 +47,9 @@ func main() {
 		fmt.Printf("%#v\n", cfg)
 	}
 
+	fakeTimer := libnamed.NewFakeTimer(1 * time.Second)
+	fakeTimer.Run()
+
 	var logType libnamed.LogType = libnamed.LogTypeConsole
 	logPath := ""
 	if logCfgs := strings.Split(cfg.Server.Main.LogFile, ":"); len(logCfgs) == 2 {
@@ -58,8 +62,20 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	cachex.New(256)
+
+	// init cache
+	switch cfg.Server.Cache.Mode {
+	case configx.CacheModeSkipList:
+		cachex.NewDefaultSklCache()
+	case configx.CacheModeHashTable:
+		cachex.NewDefaultHashCache()
+	default:
+		panic("invalid cache mode")
+	}
+
 	var wg sync.WaitGroup
 	serverx.Serve(&cfg, &wg)
 	wg.Wait()
+
+	fakeTimer.Stop()
 }
