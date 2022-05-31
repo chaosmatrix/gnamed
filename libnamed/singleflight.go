@@ -25,9 +25,10 @@ import (
 
 // call is an in-flight or completed Do call
 type call struct {
-	wg  sync.WaitGroup
-	val *dns.Msg
-	err error
+	wg    sync.WaitGroup
+	val   *dns.Msg
+	err   error
+	count int // count of in-flight
 }
 
 // Group represents a class of work and forms a namespace in which
@@ -47,6 +48,7 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 		g.m = make(map[string]*call)
 	}
 	if c, ok := g.m[key]; ok {
+		c.count++
 		g.mu.Unlock()
 		c.wg.Wait()
 		// caller might update value, need to do copy
@@ -56,6 +58,7 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 		return c.val.Copy(), true, c.err
 	}
 	c := new(call)
+	c.count = 1
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
@@ -71,5 +74,11 @@ func (g *Group) Do(key string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, err
 	if c.err != nil {
 		return c.val, false, c.err
 	}
+
+	if c.count == 1 {
+		// only one, don't need to do deep copy
+		return c.val, false, c.err
+	}
+
 	return c.val.Copy(), false, c.err
 }

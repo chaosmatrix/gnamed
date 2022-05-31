@@ -25,23 +25,8 @@ type AdminResponse struct {
 	Msg    string
 }
 
-// admin api special for browser, not compitable with restful api
-// /cache/<action>?name=<domain>&type=<type_str>
-func handleRequestAdminCache(c *gin.Context) {
-	start := time.Now()
-
-	logEvent := libnamed.Logger.Debug().Str("log_type", "admin")
-
-	clientIP := c.ClientIP()
-	logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
-
-	if c.Request.Method != "GET" && c.Request.Method != "POST" {
-		logEvent.Int("status_code", http.StatusMethodNotAllowed)
-		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
-		logEvent.Dur("latency", time.Since(start)).Msg("")
-		return
-	}
-
+func adminAuthUser(clientIP string, user string, password string) bool {
+	cfg := getGlobalConfig()
 	// Auth
 	cidrAllow := len(cfg.Admin.Auth.Cidr) == 0
 
@@ -64,18 +49,104 @@ func handleRequestAdminCache(c *gin.Context) {
 	// token check
 	userAllow := false
 
-	user, password := c.Query("user"), c.Query("password")
 	if len(cfg.Admin.Auth.Token) == 0 || (user != "" && password != "" && hmac.Equal([]byte(cfg.Admin.Auth.Token[user]), []byte(password))) {
 		userAllow = true
 	}
 
-	if !cidrAllow || !userAllow {
+	return cidrAllow && userAllow
+}
+
+// /config/reload
+// need rate limit
+func handleRequestAdminConfig(c *gin.Context) {
+	start := time.Now()
+
+	logEvent := libnamed.Logger.Debug().Str("log_type", "admin")
+
+	clientIP := c.ClientIP()
+	logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
+
+	if c.Request.Method != "GET" && c.Request.Method != "POST" {
+		logEvent.Int("status_code", http.StatusMethodNotAllowed)
+		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
+		logEvent.Dur("latency", time.Since(start)).Msg("")
+		return
+	}
+
+	if adminAuthUser(clientIP, c.Query("user"), c.Query("password")) {
+		action := c.Params.ByName("action")
+		//fname := c.Query("filename")
+		logEvent.Str("action", action)
+
+		switch action {
+		case "reload":
+			cfg := getGlobalConfig()
+			lastTimestamp := cfg.GetTimestamp()
+
+			// rate limit
+			if time.Since(lastTimestamp) < 5*time.Second {
+				logEvent.Bool("rate_limit", true)
+				c.Header("Retry-After", "5")
+				c.JSON(http.StatusTooManyRequests, AdminResponse{
+					Status: 1,
+					Desc:   "reload config in high frequency, retry after 5 seconds",
+					Msg:    "",
+				})
+			} else {
+				_, err := updateGlobalConfig()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, AdminResponse{
+						Status: 1,
+						Desc:   fmt.Sprintf("failed to update configuration, please make sure the configuration file correct, error: '%v'", err),
+						Msg:    "",
+					})
+				} else {
+					cfg = getGlobalConfig()
+					currTimestamp := cfg.GetTimestamp()
+					c.JSON(http.StatusOK, AdminResponse{
+						Status: 0,
+						Desc:   "success update configuration.",
+						Msg:    "lastTimestamp: " + lastTimestamp.String() + " currTimestamp: " + currTimestamp.String(),
+					})
+				}
+			}
+		default:
+			c.JSON(http.StatusBadRequest, AdminResponse{
+				Status: 1,
+				Desc:   "invalid request",
+				Msg:    "",
+			})
+			logEvent.Err(errors.New("action not allow"))
+		}
+	} else {
 		c.JSON(http.StatusForbidden, AdminResponse{
 			Status: 1,
 			Desc:   "auth require",
 			Msg:    "",
 		})
-	} else {
+	}
+
+	logEvent.Dur("latency", time.Since(start)).Msg("")
+}
+
+// admin api special for browser, not compitable with restful api
+// /cache/<action>?name=<domain>&type=<type_str>
+func handleRequestAdminCache(c *gin.Context) {
+	start := time.Now()
+
+	logEvent := libnamed.Logger.Debug().Str("log_type", "admin")
+
+	clientIP := c.ClientIP()
+	logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
+
+	if c.Request.Method != "GET" && c.Request.Method != "POST" {
+		logEvent.Int("status_code", http.StatusMethodNotAllowed)
+		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
+		logEvent.Dur("latency", time.Since(start)).Msg("")
+		return
+	}
+
+	if adminAuthUser(clientIP, c.Query("user"), c.Query("password")) {
 		action := c.Params.ByName("action")
 		name := dns.Fqdn(strings.ToLower(c.Query("name")))
 		qtype := strings.ToUpper(c.Query("type"))
@@ -87,8 +158,19 @@ func handleRequestAdminCache(c *gin.Context) {
 		case "show":
 			handleRequestAdminCacheShow(c, logEvent, name, qtype)
 		default:
+			c.JSON(http.StatusBadRequest, AdminResponse{
+				Status: 1,
+				Desc:   "invalid request",
+				Msg:    "",
+			})
 			logEvent.Err(errors.New("action not allow"))
 		}
+	} else {
+		c.JSON(http.StatusForbidden, AdminResponse{
+			Status: 1,
+			Desc:   "auth require",
+			Msg:    "",
+		})
 	}
 
 	logEvent.Dur("latency", time.Since(start)).Msg("")
@@ -149,6 +231,10 @@ func serveAdminFunc(listen configx.Listen) {
 	cachePath := path.Join(listen.DohPath, "/cache/:action")
 	r.GET(cachePath, handleRequestAdminCache)
 	r.POST(cachePath, handleRequestAdminCache)
+
+	configPath := path.Join(listen.DohPath, "/config/:action")
+	r.GET(configPath, handleRequestAdminConfig)
+	r.POST(configPath, handleRequestAdminConfig)
 
 	if listen.TlsConfig.CertFile == "" {
 		err := r.Run(listen.Addr)

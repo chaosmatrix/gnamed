@@ -3,7 +3,9 @@ package cachex
 import (
 	"fmt"
 	"gnamed/libnamed"
+	"math"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 	"unsafe"
@@ -141,7 +143,7 @@ func TestSklCache(t *testing.T) {
 					}
 
 					if p, found := sklc.tables[tes[i].qtype].table[tes[i].domain]; found {
-						if *(*uint64)(unsafe.Pointer(p)) != *(*uint64)(unsafe.Pointer(curr)) {
+						if *(*uint64)(unsafe.Pointer(p.sklNode)) != *(*uint64)(unsafe.Pointer(curr)) {
 							t.Errorf("[+] domain %s pointer address not equal, pointer in table %p, pointer in skiplist %p\n", tes[i].domain, p, curr)
 						}
 					}
@@ -198,4 +200,78 @@ func TestSklCache(t *testing.T) {
 	}
 
 	fakeTimer.Stop()
+}
+
+func TestSklCacheRandom(t *testing.T) {
+	size := 1 << 16
+	removePercent := 100 // 1/100
+
+	sklc := newSklCache(32, 0.5)
+
+	for i := 300; i < size; i++ {
+		ok := sklc.Set(strconv.Itoa(i), uint16(i%32+3), []byte{byte(i)}, uint32(i&math.MaxUint32))
+		if !ok {
+			t.Errorf("[+] bug: insert key '%d'\n", i)
+		}
+	}
+
+	for i := 300; i < size; i++ {
+		if i%removePercent != 0 {
+			continue
+		}
+		ok := sklc.Remove(strconv.Itoa(i), uint16(i%32+3))
+
+		if !ok {
+			t.Errorf("[+] bug: key '%d' exist, but failed to remove\n", i)
+		}
+	}
+
+	for i := 300; i < size; i++ {
+		val, _, found := sklc.Get(strconv.Itoa(i), uint16(i%32+3))
+
+		if found {
+			if i%removePercent == 0 || len(val) == 0 || val[0] != byte(i) {
+				t.Errorf("[+] bug: key '%d' exist, but not found\n", i)
+			}
+		} else {
+			if i%removePercent != 0 {
+				t.Errorf("[+] bug: key '%d' already remove, but found\n", i)
+			}
+		}
+
+	}
+}
+
+func BenchmarkSklCacheInsert(b *testing.B) {
+
+	sklc := newSklCache(32, 0.5)
+
+	for i := 300; i < b.N; i++ {
+		sklc.Set(strconv.Itoa(i), 1, []byte{byte(i)}, uint32(i&math.MaxUint32))
+	}
+
+	for i := 300; i < b.N; i++ {
+		if val, _, found := sklc.Get(strconv.Itoa(i), 1); !found || val[0] != byte(i) {
+			fmt.Printf("[+] bug: SklCache get key '%d' val '%v' success '%v'\n", i, val, found)
+		}
+	}
+
+	for i := 300; i < b.N; i++ {
+		if found := sklc.Remove(strconv.Itoa(i), 1); !found {
+			fmt.Printf("[+] bug: SklCache delete key '%d'\n", i)
+		}
+	}
+}
+
+func BenchmarkSkl(b *testing.B) {
+	skl := NewSkipList(32, 0.5)
+	for i := 0; i < b.N; i++ {
+		skl.Insert(int64(i))
+	}
+
+	for i := 0; i < b.N; i++ {
+		if node, found := skl.Get(int64(i)); !found || uint32(node.value) != uint32(i&math.MaxUint32) {
+			fmt.Printf("[+] bug: SkipList get %d\n", i)
+		}
+	}
 }

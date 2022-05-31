@@ -16,6 +16,8 @@ func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
 	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
 	start := time.Now()
+
+	cfg := getGlobalConfig()
 	rmsg, err := queryx.Query(r, cfg, logEvent)
 	if err != nil {
 		logEvent.Err(err).Dur("latency", time.Since(start))

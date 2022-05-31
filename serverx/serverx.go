@@ -7,15 +7,22 @@ import (
 	"sync"
 )
 
-var cfg *configx.Config
-
 var (
 	ErrServerProtocolUnsupport = errors.New("protocol not implemented")
 )
 
 func Serve(config *configx.Config, wg *sync.WaitGroup) {
+	sc := &serverConfig{
+		configs: make([]*configx.Config, 2),
+		currId:  0,
+		lock:    sync.Mutex{},
+	}
+	sc.configs[sc.currId] = config
+
+	globalServerConfig = sc
+
 	// init golbal
-	cfg = config
+	cfg := config
 
 	sls := cfg.Server.Listen
 

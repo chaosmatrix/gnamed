@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"gnamed/cachex"
 	"gnamed/libnamed"
 	"gnamed/serverx"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,11 +34,11 @@ func main() {
 	}
 
 	if dumpJson {
-		if bs, err := json.MarshalIndent(cfg, "", "    "); err == nil {
-			fmt.Printf("%s\n", bs)
-		} else {
+		jsonStr, err := cfg.DumpJson()
+		if err != nil {
 			panic(err)
 		}
+		fmt.Printf("%s\n", jsonStr)
 		return
 	}
 	if verbose {
@@ -50,28 +48,14 @@ func main() {
 	fakeTimer := libnamed.NewFakeTimer(1 * time.Second)
 	fakeTimer.Run()
 
-	var logType libnamed.LogType = libnamed.LogTypeConsole
-	logPath := ""
-	if logCfgs := strings.Split(cfg.Server.Main.LogFile, ":"); len(logCfgs) == 2 {
-		logType = libnamed.LogType(logCfgs[0])
-		logPath = logCfgs[1]
-	} else if len(logCfgs) == 1 {
-		logType = libnamed.LogType(logCfgs[0])
-	}
-	_, err = libnamed.NewLogger(string(logType), logPath, cfg.Server.Main.LogLevel)
+	err = libnamed.InitDefaultLogger(cfg.Server.Main.LogFile, cfg.Server.Main.LogLevel)
 	if err != nil {
+		fmt.Printf("[+] failed to init default logger\n")
 		panic(err)
 	}
 
 	// init cache
-	switch cfg.Server.Cache.Mode {
-	case configx.CacheModeSkipList:
-		cachex.NewDefaultSklCache()
-	case configx.CacheModeHashTable:
-		cachex.NewDefaultHashCache()
-	default:
-		panic("invalid cache mode")
-	}
+	cachex.InitCache(cfg.Server.Cache.Mode)
 
 	var wg sync.WaitGroup
 	serverx.Serve(&cfg, &wg)
