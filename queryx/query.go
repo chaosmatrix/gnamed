@@ -103,8 +103,8 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 		return rmsg, nil
 	}
 	// 3. external query
-	dnsTag, nameserver := config.Server.FindNameServer(qname)
-	logEvent.Str("nameserver_tag", dnsTag)
+	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
+	logEvent.Str("nameserver_tag", nameServerTag)
 
 	if nameserver == nil {
 		// reply from hosts file

@@ -7,32 +7,33 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 func NewDefaultSklCache() {
 	newSklCache(32, 0.5)
 }
 
-// TODO:
-// 1. lazy inittialize to reduce startup memory require (300MB+ -> 30MB-)
-
-// SkipList: current_time + ttl
-// qtype -> SkipListNode:
-// qtype -> domain -> *SkipListNode : map[qtype]map[domain]*SkipListNode
 type SklCache struct {
 	lock        *sync.Mutex // lock for lazy init
 	maxLevel    int         // skiplist maxlevel
 	probability float64     // skiplist probability
 
-	// qtype -> domain -> *SkipListNode
+	// qtype -> SklTable
 	tables []*SklTable // 1<<16
 	// qtype -> SkipList
 	skls []*SkipList // 1<<16
 }
 
 type SklTable struct {
-	table map[string]*SkipListNode
+	table map[string]*TableNode
 	lock  *sync.RWMutex
+}
+
+type TableNode struct {
+	sklNode *SkipListNode // SkipListNode.vals and SkipListNode.value to evict expired keys
+	val     []byte        // dns.Msg
 }
 
 func NewSklCache(maxLevel int, probability float64) *SklCache {
@@ -47,18 +48,6 @@ func newSklCache(maxLevel int, probability float64) *SklCache {
 	tables := make([]*SklTable, size)
 	skls := make([]*SkipList, size)
 
-	/*
-		// lazy init
-		for i := 0; i < size; i++ {
-			tables[i] = &SklTable{
-				table: make(map[string]*SkipListNode),
-				lock:  new(sync.RWMutex),
-			}
-
-			skls[i] = NewSkipList(maxLevel, probability)
-		}
-	*/
-
 	sklCache := &SklCache{
 		lock:        new(sync.Mutex),
 		maxLevel:    maxLevel,
@@ -66,6 +55,11 @@ func newSklCache(maxLevel int, probability float64) *SklCache {
 
 		tables: tables,
 		skls:   skls,
+	}
+
+	// init common qtype at startup
+	for _, qtype := range []uint16{dns.TypeA} {
+		sklCache.lazyInit(qtype)
 	}
 
 	// set public function
@@ -88,7 +82,7 @@ func (sklc *SklCache) lazyInit(qtype uint16) {
 		if sklc.tables[qtype] == nil {
 			// need to init
 			sklc.tables[qtype] = &SklTable{
-				table: make(map[string]*SkipListNode),
+				table: make(map[string]*TableNode),
 				lock:  new(sync.RWMutex),
 			}
 			sklc.skls[qtype] = NewSkipList(sklc.maxLevel, sklc.probability)
@@ -106,14 +100,14 @@ func (sklc *SklCache) Get(key string, qtype uint16) ([]byte, int64, bool) {
 
 	sklt := sklc.tables[qtype]
 	sklt.lock.RLock()
-	if node, found := sklt.table[key]; found {
-		val := node.vals[key]
-		expiredUTC := node.value
+	if tnode, found := sklt.table[key]; found {
+		val := tnode.val
+		expiredUTC := tnode.sklNode.value
 
 		sklt.lock.RUnlock()
 
 		// check ttl
-		if libnamed.GetFakeTimerUnixSecond() > node.value {
+		if libnamed.GetFakeTimerUnixSecond() > tnode.sklNode.value {
 			// remove
 			sklc.Remove(key, qtype)
 			// steal cache, let caller determine using or not
@@ -172,64 +166,71 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 	}
 
 	// remove old
-	if oldNode, exist := sklt.table[key]; exist {
-		if oldNode.value == expiredUTC {
+	if oldTNode, exist := sklt.table[key]; exist {
+		if oldTNode.sklNode.value == expiredUTC {
 			// should not reach
-			oldNode.vals[key] = value
+			oldTNode.val = value
 			return true
 		}
 
-		delete(oldNode.vals, key)
-		if len(oldNode.vals) == 0 {
-			skll.Erase(oldNode.value)
+		delete(oldTNode.sklNode.vals, key)
+		if len(oldTNode.sklNode.vals) == 0 {
+			skll.Erase(oldTNode.sklNode.value)
 		}
 	}
 
 	// check expireSecond match skipListNode exist or not
 	if node, found := skll.Get(expiredUTC); found {
 		// add new key
-		node.vals[key] = value
+		node.vals[key] = struct{}{}
 		// update
-		sklt.table[key] = node
+		sklt.table[key] = &TableNode{
+			val:     value,
+			sklNode: node,
+		}
 		return true
 	}
 
 	node := skll.Insert(expiredUTC)
-	node.vals[key] = value
-	sklt.table[key] = node
+	node.vals[key] = struct{}{}
+	sklt.table[key] = &TableNode{
+		val:     value,
+		sklNode: node,
+	}
 
 	return true
 }
 
 // O(1) or O(logN)
+// Optimizaion:
+// 1. O(1): delay erase skipListNode until node.value < currentUTC
+// 2. O(1): use double-linked list to contruct skiplist
 func (sklc *SklCache) Remove(key string, qtype uint16) bool {
 	// lazy init
 	sklc.lazyInit(qtype)
 
 	sklt := sklc.tables[qtype]
 	sklt.lock.Lock()
-	if node, found := sklt.table[key]; found {
+	defer sklt.lock.Unlock()
+
+	if tnode, found := sklt.table[key]; found {
 
 		// remove entry in table
 		delete(sklt.table, key)
-		sklt.lock.Unlock()
 
 		skll := sklc.skls[qtype]
 		skll.lock.Lock()
 
-		delete(node.vals, key)
+		delete(tnode.sklNode.vals, key)
 
-		if len(node.vals) == 0 {
+		if len(tnode.sklNode.vals) == 0 {
 			// remove entry in list
-			skll.Erase(node.value)
+			skll.Erase(tnode.sklNode.value)
 		}
 
 		skll.lock.Unlock()
-
 		return true
 	}
-
-	sklt.lock.Unlock()
 	return false
 }
 
@@ -254,7 +255,7 @@ func (sklc *SklCache) EraseBefore(qtype uint16, target int64) {
 
 	curr := skll.head
 	for curr != nil && curr.value <= target {
-		for k, _ := range curr.vals {
+		for k := range curr.vals {
 			delete(sklt.table, k)
 		}
 		curr = curr.forward[0]
@@ -268,8 +269,8 @@ func (sklc *SklCache) EraseBefore(qtype uint16, target int64) {
 // same as LinkList, SkipListNode.Level[i] is LinkList.Next
 // ? change into Double-LinkList, make Delete O(1) ?
 type SkipListNode struct {
-	value   int64             // sorted element
-	vals    map[string][]byte // key -> val
+	value   int64               // sorted element, expiredUTC = time.Now() + ttl (uint32)
+	vals    map[string]struct{} // hashset
 	forward []*SkipListNode
 }
 
@@ -311,7 +312,7 @@ func NewSkipList(maxLevel int, probability float64) *SkipList {
 // FIXME
 func NewSkipListNode() *SkipListNode {
 	return &SkipListNode{
-		vals: make(map[string][]byte),
+		vals: make(map[string]struct{}),
 	}
 }
 

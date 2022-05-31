@@ -31,6 +31,8 @@ var (
 )
 
 type Config struct {
+	filename           string            `json:"-"` // current using configuration file name
+	timestamp          time.Time         `json:"-"` // configuration file parse timestamp
 	lock               *sync.Mutex       `json:"-"` // internal use, lazy init some values
 	singleflightGroups []*libnamed.Group `json:"-"` // max size 1<<16
 	Server             Server            `json:"server"`
@@ -215,6 +217,9 @@ func parseConfig(fname string) (Config, error) {
 		return cfg, err
 	}
 
+	cfg.filename = fname
+	cfg.timestamp = time.Now()
+
 	for i := 0; i < len(cfg.Server.Listen); i++ {
 		cfg.Server.Listen[i].parseListen()
 	}
@@ -272,6 +277,19 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	return cfg, err
+}
+
+func (cfg *Config) DumpJson() (string, error) {
+	bs, err := json.MarshalIndent(cfg, "", "    ")
+	return string(bs), err
+}
+
+func (cfg *Config) GetFileName() string {
+	return cfg.filename
+}
+
+func (cfg *Config) GetTimestamp() time.Time {
+	return cfg.timestamp
 }
 
 func verifyDefaultingCache(c *Cache) {
@@ -425,6 +443,7 @@ func compileQueryRegexp(qm map[string]QueryList) {
 	}
 }
 
+// return (cname, vname), if cname exist, else name
 func (srv *Server) FindRealName(name string) (string, string) {
 	idx := 0
 	for i := 0; i < MaxCnameCounts; i++ {
@@ -446,37 +465,21 @@ func (srv *Server) FindRealName(name string) (string, string) {
 	return name, "."
 }
 
-func (srv *Server) FindNameServer(name string) (string, *NameServer) {
-	idx := 0
-	cnames := 0
-	for {
-		if _vi, _found := srv.View[name[idx:]]; _found {
-			if cnames < MaxCnameCounts && _vi.Cname != "" && name != _vi.Cname {
-				cnames++
-				name = _vi.Cname
-				idx = 0
-				continue
-			}
-			if _vi.ResolveType == ResolveTypeLocal {
-				return "", nil
-			}
-			if _dns, _found := srv.NameServer[_vi.NameServerTag]; _found {
-				return _vi.NameServerTag, &_dns
-			}
-			return "", nil
-		} else if len(name[idx:]) == 1 {
-			break
-		}
-		idx1 := strings.Index(name[idx:], ".")
-		if idx < 0 {
-			break
-		}
-		idx += idx1
-		if len(name[idx:]) != 1 {
-			idx++
+// request domain should first call `FindRealName` to get vname (after cname loop if exist)
+// vname was the last viewName, ignore rest cname event exist (alreay reach MaxCnameCounts)
+func (srv *Server) FindViewNameServer(vname string) (string, *NameServer) {
+	if vi, found := srv.View[vname]; found && vi.ResolveType != ResolveTypeLocal {
+		if ns, exist := srv.NameServer[vi.NameServerTag]; exist {
+			return vi.NameServerTag, &ns
 		}
 	}
 	return "", nil
+}
+
+// input original name, not vname
+func (srv *Server) FindNameServer(name string) (string, *NameServer) {
+	_, vname := srv.FindRealName(name)
+	return srv.FindViewNameServer(vname)
 }
 
 func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool) {

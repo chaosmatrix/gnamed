@@ -113,6 +113,7 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 	r.RecursionDesired = true
 	r.Question = []dns.Question{q}
 
+	cfg := getGlobalConfig()
 	rmsg, err := queryx.Query(r, cfg, logEvent)
 	if err != nil {
 		logEvent.Err(err)
@@ -222,6 +223,8 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 		handleDoHRequestBadRequest(c, logEvent)
 		return
 	}
+
+	cfg := getGlobalConfig()
 	rmsg, err := queryx.Query(r, cfg, logEvent)
 	if err != nil {
 		logEvent.Err(err)
