@@ -50,8 +50,6 @@ Response:
 
 ### RFC8484
 
-aka. Google HTTPDNS JSON, first use by Google HTTPDNS.
-
 ##### Content-Type / Accept
 
 as RFC8484 require, http header `Accept: application/dns-message` should be set.
