@@ -99,17 +99,23 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	// 2. cache search
 	if !byPassCache {
 		cacheCfg := config.Server.Cache
-		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (expiredUTC > 0 && cacheCfg.UseSteal) {
+		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && expiredUTC > 0) {
 			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && expiredUTC-libnamed.GetFakeTimerUnixSecond() <= cacheCfg.BeforeExpiredSecond {
+				logEvent.Bool("background_update", true)
 				// do background query
 				go func(nr *dns.Msg) {
-					_logEvent := libnamed.Logger.Debug().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype])
+					_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype])
 					// bypass singflight & cache
 					_, nerr := query(nr, config, _logEvent, true)
 					_logEvent.Err(nerr).Msg("")
 				}(r.Copy())
 			}
-			logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("cache", "hit")
+			logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode])
+			if found {
+				logEvent.Str("cache", "hit")
+			} else {
+				logEvent.Str("cache", "steal")
+			}
 			setReply(rmsg, r, origName)
 			return rmsg, nil
 		}
@@ -239,7 +245,7 @@ func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
 func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
-	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found {
+	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {
 		resp := new(dns.Msg)
 		if err := resp.Unpack(bmsg); err != nil {
 			// 1. log error
@@ -252,7 +258,7 @@ func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool)
 		cacheTTL := getMsgTTL(resp, cacheCfg)
 		replyUpdateTTL(resp, expiredUTC, cacheTTL)
 
-		return resp, expiredUTC, true
+		return resp, expiredUTC, found
 	}
 
 	return nil, 0, false
