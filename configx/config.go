@@ -1,12 +1,15 @@
 package configx
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"gnamed/libnamed"
 	"io/ioutil"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -91,6 +94,10 @@ type DODServer struct {
 	Server  string  `json:"server"`
 	Timeout Timeout `json:"timeout"`
 	DnsOpt  DnsOpt  `json:"dns_opt"`
+
+	// use internal
+	ClientUDP *dns.Client `json:"-"`
+	ClientTCP *dns.Client `json:"-"`
 }
 
 type DOHMsgType string
@@ -114,6 +121,9 @@ type DOHServer struct {
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
 	DnsOpt    DnsOpt    `json:"dns_opt"`
+
+	// use internal
+	Client *http.Client `json:"-"`
 }
 
 type DOTServer struct {
@@ -126,6 +136,9 @@ type DOTServer struct {
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
 	DnsOpt    DnsOpt    `json:"dns_opt"`
+
+	// use internal
+	Client *dns.Client `json:"-"`
 }
 
 type Timeout struct {
@@ -161,11 +174,12 @@ type Host struct {
 
 // Server -> Cache
 type Cache struct {
-	Policy       string `json:"policy"`
-	MaxTTL       uint32 `json:"maxTTL"`
-	MinTTL       uint32 `json:"minTTL"`
-	ScanInterval string `json:"scanInterval"`
-	Mode         string `json:"mode"`
+	MaxTTL              uint32 `json:"maxTTL"`
+	MinTTL              uint32 `json:"minTTL"`
+	Mode                string `json:"mode"`
+	UseSteal            bool   `json:"useSteal"`            // use steal cache, when element expired, return and trigger background query
+	BackgroundUpdate    bool   `json:"backGroundUpdate"`    // UseSteal always trigger background query
+	BeforeExpiredSecond int64  `json:"beforeExpiredSecond"` // if an element will be expired less than this seconds, enable background query
 }
 
 // Query
@@ -223,9 +237,9 @@ func parseConfig(fname string) (Config, error) {
 	for i := 0; i < len(cfg.Server.Listen); i++ {
 		cfg.Server.Listen[i].parseListen()
 	}
-	// TODO: additional check
-	if !verifyViewNameServerTag(&cfg.Server) {
-		return cfg, errors.New("some View's has invalid nameserver_tag")
+
+	if err = cfg.Server.parse(); err != nil {
+		return cfg, err
 	}
 
 	// view -> FQDN
@@ -239,28 +253,26 @@ func parseConfig(fname string) (Config, error) {
 		}
 		cfg.Server.View[vkFqdn] = vv
 	}
+
 	for i := 0; i < len(cfg.Server.Hosts); i++ {
 		cfg.Server.Hosts[i].Name = dns.Fqdn(cfg.Server.Hosts[i].Name)
 	}
 
-	cfg.Server.Main.verify()
+	if err = cfg.Server.Main.parse(); err != nil {
+		return cfg, err
+	}
+
 	if cfg.Server.Main.Singleflight {
 		cfg.singleflightGroups = make([]*libnamed.Group, 1<<16)
 		cfg.lock = new(sync.Mutex) // initialize global lock
 	}
 
 	// verify and defaulting cache configuration options
-
 	verifyDefaultingCache(&cfg.Server.Cache)
 
-	fqdnQueryList(cfg.Query.BlackList)
-	fqdnQueryList(cfg.Query.WhiteList)
-
-	compileQueryRegexp(cfg.Query.BlackList)
-	compileQueryRegexp(cfg.Query.WhiteList)
-
-	contructQueryList(cfg.Query.BlackList)
-	contructQueryList(cfg.Query.WhiteList)
+	if err = cfg.Query.parse(); err != nil {
+		return cfg, err
+	}
 
 	// admin cidr
 	for i := 0; i < len(cfg.Admin.Auth.Cidr); i++ {
@@ -268,11 +280,11 @@ func parseConfig(fname string) (Config, error) {
 			cfg.Admin.Auth.Cidr[i] += "/32"
 		}
 
-		if _, _cidr, _err := net.ParseCIDR(cfg.Admin.Auth.Cidr[i]); _err == nil {
-			cfg.Admin.Auth.Cidr[i] = _cidr.String()
+		var cidr *net.IPNet
+		if _, cidr, err = net.ParseCIDR(cfg.Admin.Auth.Cidr[i]); err == nil {
+			cfg.Admin.Auth.Cidr[i] = cidr.String()
 		} else {
 			fmt.Fprintf(os.Stderr, "[+] invalid cidr %s\n", cfg.Admin.Auth.Cidr[i])
-			err = _err
 		}
 	}
 
@@ -356,11 +368,11 @@ func (cfg *Config) GetSingleFlightGroup(qtype uint16) *libnamed.Group {
 	return cfg.singleflightGroups[qtype]
 }
 
-func (mf *Main) verify() bool {
+func (mf *Main) parse() error {
 	if mf.LogLevel == "" {
 		mf.LogLevel = zerolog.DebugLevel.String()
 	}
-	return true
+	return nil
 }
 
 func (t *Timeout) parseTimeout() {
@@ -385,61 +397,282 @@ func (t *Timeout) parseTimeout() {
 	setDuration(&t.WriteDuration, t.Write, DefaultTimeoutDurationWrite)
 }
 
-func verifyViewNameServerTag(srv *Server) bool {
+func (srv *Server) parse() error {
 	res := true
-	for _zone, _vi := range srv.View {
-		if _ns, _found := srv.NameServer[_vi.NameServerTag]; !_found {
-			fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", _zone, _vi.NameServerTag)
+
+	// verify using nameserverTag valid
+	for zone, vi := range srv.View {
+		if ns, found := srv.NameServer[vi.NameServerTag]; !found {
+			fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", zone, vi.NameServerTag)
 			res = false
 		} else {
-			switch _ns.Protocol {
+			var err error
+
+			switch ns.Protocol {
 			case ProtocolTypeDNS:
-				_ns.Dns.Timeout.parseTimeout()
+				err = ns.Dns.parse()
 			case ProtocolTypeDoH:
-				_ns.DoH.Timeout.parseTimeout()
+				err = ns.DoH.parse()
 			case ProtocolTypeDoT:
-				_ns.DoT.Timeout.parseTimeout()
+				err = ns.DoT.parse()
 			default:
-				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", _vi.NameServerTag, _ns.Protocol)
+				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", vi.NameServerTag, ns.Protocol)
+				res = false
+			}
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s', parse failed, error: %v\n", vi.NameServerTag, err)
+				res = false
+			}
+			srv.NameServer[vi.NameServerTag] = ns
+		}
+	}
+	if res {
+		return nil
+	}
+	return errors.New("some View's has invalid nameserver_tag")
+}
+
+func (dod *DODServer) parse() error {
+
+	errInvalidServer := fmt.Errorf("invalid dns server address '%s'", dod.Server)
+	host, portStr, err := net.SplitHostPort(dod.Server)
+	if err != nil {
+		host = dod.Server
+		dod.Server = net.JoinHostPort(dod.Server, strconv.Itoa(DefaultPortDns))
+	} else {
+		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
+			return errInvalidServer
+		}
+	}
+
+	if net.ParseIP(host) == nil {
+		return errInvalidServer
+	}
+
+	dod.Timeout.parseTimeout()
+
+	dod.ClientUDP = &dns.Client{
+		// Default buffer size to use to read incoming UDP message
+		// default 512 B
+		// must increase if edns-client-sub enable
+		UDPSize:      1024,
+		Net:          "udp",
+		DialTimeout:  dod.Timeout.ConnectDuration,
+		ReadTimeout:  dod.Timeout.ReadDuration,
+		WriteTimeout: dod.Timeout.WriteDuration,
+		//SingleInflight: true,
+	}
+
+	dod.ClientTCP = &dns.Client{
+		// Default buffer size to use to read incoming UDP message
+		// default 512 B
+		// must increase if edns-client-sub enable
+		UDPSize:      1024,
+		Net:          "tcp",
+		DialTimeout:  dod.Timeout.ConnectDuration,
+		ReadTimeout:  dod.Timeout.ReadDuration,
+		WriteTimeout: dod.Timeout.WriteDuration,
+		//SingleInflight: true,
+	}
+
+	return nil
+}
+
+func (doh *DOHServer) parse() error {
+	errInvalidServer := fmt.Errorf("invalid dns-over-https server address '%s'", doh.Url)
+
+	// process header
+	for hk, hm := range doh.Headers {
+		hkc := http.CanonicalHeaderKey(hk)
+		if hkc != hk {
+			delete(doh.Headers, hk)
+			doh.Headers[hkc] = hm
+		}
+	}
+
+	urlStruct, err := url.Parse(doh.Url)
+	if err != nil || (urlStruct.Scheme != "http" && urlStruct.Scheme != "https") {
+		return errInvalidServer
+	}
+
+	host, portStr := urlStruct.Hostname(), urlStruct.Port()
+	if portStr != "" {
+		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
+			return errInvalidServer
+		}
+	}
+
+	if net.ParseIP(host) == nil {
+		if _, found := doh.Headers["Host"]; !found {
+			doh.Headers["Host"] = []string{host}
+		}
+
+		if doh.TlsConfig.ServerName == "" {
+			doh.TlsConfig.ServerName = host
+		}
+
+		qname := dns.Fqdn(host)
+		host = ""
+		if libnamed.ValidateDomain(qname) {
+			host = lookupIP(qname, doh.ExternalNameServers)
+		}
+
+		if host == "" {
+			return fmt.Errorf("server '%s' no valid ip address found", doh.Url)
+		}
+
+		if host != "" && portStr != "" {
+			host = net.JoinHostPort(host, portStr)
+		}
+
+		urlStruct.Host = host
+
+		doh.Url = urlStruct.String()
+	}
+
+	doh.Timeout.parseTimeout()
+
+	client := &http.Client{
+		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
+	}
+
+	if doh.TlsConfig.ServerName != "" {
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				ServerName: doh.TlsConfig.ServerName,
+			},
+			ForceAttemptHTTP2: true,
+			Proxy:             http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+		client.Transport = tr
+	}
+	doh.Client = client
+	return nil
+}
+
+// FIXME: dot.Server was a config file, should not be change.
+func (dot *DOTServer) parse() error {
+	errInvalidServer := fmt.Errorf("invalid dns-over-tls server address '%s'", dot.Server)
+	host, portStr, err := net.SplitHostPort(dot.Server)
+	if err != nil {
+		host = dot.Server
+		portStr = strconv.Itoa(DefaultPortDoT)
+		dot.Server = net.JoinHostPort(dot.Server, portStr)
+	} else {
+		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
+			return errInvalidServer
+		}
+	}
+
+	if net.ParseIP(host) == nil {
+		dot.Server = ""
+		// domain, lookupIP
+		host = dns.Fqdn(host)
+		if libnamed.ValidateDomain(host) {
+			host = lookupIP(host, dot.ExternalNameServers)
+			if len(host) != 0 {
+				dot.Server = net.JoinHostPort(host, portStr)
+			} else {
+				return fmt.Errorf("server '%s' no valid ip address found", dot.Server)
 			}
 		}
 	}
-	return res
+
+	if dot.Server == "" {
+		return errInvalidServer
+	}
+
+	if dot.Sni == "" {
+		dot.Sni = strings.ToLower(strings.TrimRight(host, "."))
+	}
+
+	dot.Timeout.parseTimeout()
+
+	dot.Client = &dns.Client{
+		Net: "tcp-tls",
+		TLSConfig: &tls.Config{
+			ServerName: dot.TlsConfig.ServerName,
+		},
+
+		DialTimeout:  dot.Timeout.ConnectDuration,
+		ReadTimeout:  dot.Timeout.ReadDuration,
+		WriteTimeout: dot.Timeout.WriteDuration,
+		//SingleInflight: true,
+	}
+
+	return nil
+}
+
+func lookupIP(name string, nameservers []string) string {
+	nss := nameservers
+	if len(nss) == 0 {
+		nss = defaultExternalNameServers
+	}
+	for _, ns := range nss {
+		r := new(dns.Msg)
+		r.SetQuestion(name, dns.TypeA)
+		client := dns.Client{
+			Timeout: 5 * time.Second,
+		}
+		if resp, _, err := client.Exchange(r, ns); err == nil {
+			for _, ans := range resp.Answer {
+				if a, ok := ans.(*dns.A); ok {
+					return a.A.String()
+				}
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[+] resolve domain '%s' failed, error: '%s'\n", name, err)
+		}
+	}
+
+	return ""
+}
+
+// parse contruct QueryList
+func (q *Query) parse() error {
+
+	contructQueryList(q.BlackList)
+	contructQueryList(q.WhiteList)
+
+	return nil
 }
 
 func contructQueryList(qm map[string]QueryList) {
-	for _k, _v := range qm {
-		for _, _rule := range _v.Equal {
-			_v.equalMap[_rule] = true
-		}
-		_v.prefixTrie = libnamed.NewPrefixTrie(_v.Prefix)
-		_v.suffixTrie = libnamed.NewSuffixTrie(_v.Suffix)
-		qm[_k] = _v
-	}
-}
+	for t, ql := range qm {
 
-func fqdnQueryList(qm map[string]QueryList) {
-	for _k, _v := range qm {
-		for _i, _ := range _v.Equal {
-			_v.Equal[_i] = dns.Fqdn(_v.Equal[_i])
+		// pre process input
+		for i := range ql.Equal {
+			ql.Equal[i] = dns.Fqdn(ql.Equal[i])
 		}
-		for _i, _ := range _v.Suffix {
-			_v.Suffix[_i] = dns.Fqdn(_v.Suffix[_i])
+		for i := range ql.Suffix {
+			ql.Suffix[i] = dns.Fqdn(ql.Suffix[i])
 		}
-		qm[_k] = _v
-	}
-}
 
-func compileQueryRegexp(qm map[string]QueryList) {
-	for _key, _ql := range qm {
-		if len(_ql.Regexp) == 0 {
-			continue
+		// build internal using data struct
+		for _, rl := range ql.Equal {
+			ql.equalMap[rl] = true
 		}
-		_ql.regexp = make([]*regexp.Regexp, len(_ql.Regexp))
-		for _i, _regexp := range _ql.Regexp {
-			_ql.regexp[_i] = regexp.MustCompile(_regexp)
+		ql.prefixTrie = libnamed.NewPrefixTrie(ql.Prefix)
+		ql.suffixTrie = libnamed.NewSuffixTrie(ql.Suffix)
+
+		if len(ql.Regexp) > 0 {
+			// pre-compile regexp
+			ql.regexp = make([]*regexp.Regexp, len(ql.Regexp))
+			for i := range ql.Regexp {
+				ql.regexp[i] = regexp.MustCompile(ql.Regexp[i])
+			}
 		}
-		qm[_key] = _ql
+
+		qm[t] = ql
 	}
 }
 
@@ -447,9 +680,9 @@ func compileQueryRegexp(qm map[string]QueryList) {
 func (srv *Server) FindRealName(name string) (string, string) {
 	idx := 0
 	for i := 0; i < MaxCnameCounts; i++ {
-		if _vi, _found := srv.View[name[idx:]]; _found {
-			if len(_vi.Cname) != 0 && name != _vi.Cname {
-				name = _vi.Cname
+		if vi, found := srv.View[name[idx:]]; found {
+			if len(vi.Cname) != 0 && name != vi.Cname {
+				name = vi.Cname
 				idx = 0
 				continue
 			} else {
@@ -483,9 +716,9 @@ func (srv *Server) FindNameServer(name string) (string, *NameServer) {
 }
 
 func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool) {
-	for _, _host := range srv.Hosts {
-		if qtype == _host.Qtype && name == _host.Name {
-			return _host.Record, true
+	for _, h := range srv.Hosts {
+		if qtype == h.Qtype && name == h.Name {
+			return h.Record, true
 		}
 	}
 	return "", false
@@ -493,25 +726,25 @@ func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool)
 
 // QueryList Match
 func (q *Query) QueryForbidden(name string, qtype string) (string, string, bool) {
-	if _r, _s, _found := q.MatchWhitlist(name, qtype); _found {
-		return _r, _s, false
+	if ruleType, ruleStr, found := q.MatchWhitlist(name, qtype); found {
+		return ruleType, ruleStr, false
 	}
-	if _r, _s, _found := q.MatchBlacklist(name, qtype); _found {
-		return _r, _s, true
+	if ruleType, ruleStr, found := q.MatchBlacklist(name, qtype); found {
+		return ruleType, ruleStr, true
 	}
 	return "", "", false
 }
 
 func (q *Query) MatchWhitlist(name string, qtype string) (string, string, bool) {
-	if _ql, _found := q.WhiteList[qtype]; _found {
-		return _ql.Match(name)
+	if ql, found := q.WhiteList[qtype]; found {
+		return ql.Match(name)
 	}
 	return "", "", false
 }
 
 func (q *Query) MatchBlacklist(name string, qtype string) (string, string, bool) {
-	if _ql, _found := q.BlackList[qtype]; _found {
-		return _ql.Match(name)
+	if ql, found := q.BlackList[qtype]; found {
+		return ql.Match(name)
 	}
 	return "", "", false
 }
@@ -532,15 +765,15 @@ func (ql *QueryList) Match(name string) (string, string, bool) {
 	// len(ql.Contain) * O(avg(len(_contain)))
 	// Optimization: Aho-Corasick or flashtext
 	// flashtext https://arxiv.org/pdf/1711.00046.pdf
-	for _, _contain := range ql.Contain {
-		if strings.Contains(name, _contain) {
-			return QueryListTypeContain, _contain, true
+	for _, rule := range ql.Contain {
+		if strings.Contains(name, rule) {
+			return QueryListTypeContain, rule, true
 		}
 	}
 	// O(m) * O(len(_ql.regexp))
-	for _, _regexp := range ql.regexp {
-		if _regexp.MatchString(name) {
-			return QueryListTypeRegexp, _regexp.String(), true
+	for _, rule := range ql.regexp {
+		if rule.MatchString(name) {
+			return QueryListTypeRegexp, rule.String(), true
 		}
 	}
 	return "", "", false

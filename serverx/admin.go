@@ -7,6 +7,7 @@ import (
 	"gnamed/cachex"
 	"gnamed/configx"
 	"gnamed/libnamed"
+	"gnamed/queryx"
 	"net"
 	"net/http"
 	"path"
@@ -179,7 +180,7 @@ func handleRequestAdminCache(c *gin.Context) {
 // GET /cache/show?name=<domain>&type=<type_str>
 func handleRequestAdminCacheShow(c *gin.Context, logEvent *zerolog.Event, name string, qtype string) {
 
-	if bmsg, _, found := cachex.Get(name, dns.StringToType[qtype]); found {
+	if bmsg, expiredUTC, found := cachex.Get(name, dns.StringToType[qtype]); found {
 		rmsg := new(dns.Msg)
 		if err := rmsg.Unpack(bmsg); err != nil {
 			logEvent.Int("status", 1).Int("status_code", http.StatusInternalServerError)
@@ -190,8 +191,13 @@ func handleRequestAdminCacheShow(c *gin.Context, logEvent *zerolog.Event, name s
 			})
 			return
 		}
+		cacheTtl := queryx.GetMsgTTL(rmsg, &getGlobalConfig().Server.Cache)
+		expiredTime := time.Unix(expiredUTC, 0).String()
+		addTime := time.Unix(expiredUTC-int64(cacheTtl), 0)
+
+		headStr := fmt.Sprintf("\n;;\n;;\n;; add at:     %s\n;; expired at: %s\n;;\n", addTime, expiredTime)
 		logEvent.Int("status", 0).Int("status_code", http.StatusOK)
-		c.String(http.StatusOK, rmsg.String())
+		c.String(http.StatusOK, headStr+rmsg.String())
 	} else {
 		logEvent.Int("status", 1).Int("status_code", http.StatusNotFound)
 		c.JSON(http.StatusNotFound, AdminResponse{

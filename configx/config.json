@@ -14,26 +14,31 @@
         "nameserver": {
             "tag_doh_cf_json_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "GET", "headers": {"content-type": ["application/dns-json"]}, "format": "JSON", "externalNameServers": ["114.114.114.114:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
             "tag_doh_cf_rfc8484_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["114.114.114.114:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
+            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://one.one.one.one/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["114.114.114.114:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
             "tag_dns_8": {"protocol": "dns", "dns": {"server": "8.8.8.8:53", "protocol": "udp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
             "tag_dot_cf": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
+            "tag_dot_cf_one": {"protocol": "tls-tcp", "dot": {"server": "one.one.one.one:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
             "tag_grpc": {"protocol": "grpc", "grpc": {"timeout": {}, "dns_opt": {}}}
         },
         "view": {
             ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_8"},
             "twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_json_01"},
             "www.twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf"},
-            "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."}
+            "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."},
+            "www.github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01_one"},
+            "github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf_one"}
         },
         "hosts": [
             {"name": "localhost.", "record": "127.0.0.1", "qtype": "A"},
             {"name": "local.github.io.", "record": "127.0.0.3", "qtype": "A"}
         ],
         "cache": {
-            "policy": "",
             "ttl": "5s",
             "minTTL": 60,
             "maxTTL": 60,
-            "scanInterval": "10s"
+            "backGroundUpdate": true,
+            "beforeExpiredSecond": 30,
+            "useSteal": true
         }
     },
     "query": {

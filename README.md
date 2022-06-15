@@ -61,7 +61,7 @@ $ gnamed
 * [x] cache: delete expired cache actively
 * [x] reply: update ttl when response from cache
 * [x] api: cache operations: delete/flush
-* [ ] api: dns query statistics
+* [ ] api: dns query statistics: NXDOMAIN(security audit), Qtype, not NOERROR
 * [x] api: update blacklist/whitelist
 * [ ] web: web ui make api easy use
 * [ ] doc: openapi https://github.com/swaggo/swag#how-to-use-it-with-gin

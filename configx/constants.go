@@ -13,11 +13,9 @@ const (
 	ProtocolTypeDoH = "https"
 	ProtocolTypeDoT = "tls-tcp"
 
-	CachePolicyTypeNegative  = "cache-positive-only"
-	CachePolicyTypeAll       = "cache-all"
-	CachePolicyTypePermanent = "cache-permanent"
-	CachePolicyTypeHardCode  = "cache-hardcode"
-	CachePolicyTypeTtl       = "cache-ttl"
+	// TODO
+	CachePassiveEvict = false // evict expired element while get element
+	CacheActiveEvict  = false // skiplist - while add new element, evict first two expired elements & evict the getting expired element
 
 	CacheModeSkipList  = "skiplist"
 	CacheModeHashTable = "hashtable"
@@ -27,10 +25,10 @@ const (
 	DefaultPortDoH   = 443
 	DefaultPortAdmin = 6677
 
-	DefaultTimeoutDurationIdle    = 60 * time.Second
-	DefaultTimeoutDurationConnect = 10 * time.Second
-	DefaultTimeoutDurationRead    = 10 * time.Second
-	DefaultTimeoutDurationWrite   = 10 * time.Second
+	DefaultTimeoutDurationIdle    = 30 * time.Second
+	DefaultTimeoutDurationConnect = 5 * time.Second
+	DefaultTimeoutDurationRead    = 5 * time.Second
+	DefaultTimeoutDurationWrite   = 5 * time.Second
 
 	DefaultDnsOptDnssec       = false
 	DefaultDnsOptEcs          = false
@@ -41,4 +39,8 @@ const (
 	DefaultCacheScanInterval = 10 * time.Second
 
 	MaxCnameCounts = 5
+)
+
+var (
+	defaultExternalNameServers = []string{"8.8.8.8:53"}
 )

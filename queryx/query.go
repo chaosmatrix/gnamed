@@ -34,13 +34,13 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	logEvent.Uint16("id", r.Id).Str("orig_name", origName).Str("qtype", qtype)
 	// disable singleflight
 	if !config.Server.Main.Singleflight {
-		return query(r, config, logEvent)
+		return query(r, config, logEvent, false)
 	}
 
 	// enable singleflight
 	singleflightGroup := config.GetSingleFlightGroup(r.Question[0].Qtype)
 	f := func() (*dns.Msg, error) {
-		return query(r, config, logEvent)
+		return query(r, config, logEvent, false)
 	}
 
 	rmsg, hit, err := singleflightGroup.Do(strings.ToLower(origName), f)
@@ -59,7 +59,7 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	return rmsg, err
 }
 
-func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Msg, error) {
+func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCache bool) (*dns.Msg, error) {
 	var err error
 
 	origName := r.Question[0].Name
@@ -89,7 +89,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	if cname != qname {
 		qname = cname
 		logEvent.Str("cname", cname)
-		for i, _ := range r.Question {
+		for i := range r.Question {
 			r.Question[i].Name = cname
 		}
 	}
@@ -97,10 +97,24 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	logEvent.Str("qname", qname)
 
 	// 2. cache search
-	if rmsg, found := cacheGetDnsMsg(r, &config.Server.Cache); found {
-		logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("cache", "hit")
-		setReply(rmsg, r, origName)
-		return rmsg, nil
+	if !byPassCache {
+		cacheCfg := config.Server.Cache
+		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (expiredUTC > 0 && cacheCfg.UseSteal) {
+			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && expiredUTC-libnamed.GetFakeTimerUnixSecond() <= cacheCfg.BeforeExpiredSecond {
+				// do background query
+				go func(nr *dns.Msg) {
+					_logEvent := libnamed.Logger.Debug().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype])
+					// bypass singflight & cache
+					_, nerr := query(nr, config, _logEvent, true)
+					_logEvent.Err(nerr).Msg("")
+				}(r.Copy())
+			}
+			logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("cache", "hit")
+			setReply(rmsg, r, origName)
+			return rmsg, nil
+		}
+	} else {
+		logEvent.Bool("by_pass_cache", byPassCache)
 	}
 	// 3. external query
 	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
@@ -147,6 +161,8 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 		cacheTTL := getMsgTTL(rmsg, &config.Server.Cache)
 		if cacheTTL == 0 {
 			// rfc1035#section-4.1.3
+			// zero ttl can be use for DNS rebinding attack, for the sake of security, should cache it short time
+			// https://crypto.stanford.edu/dns/dns-rebinding.pdf
 			logEvent.Str("cache", "skip_zero_ttl")
 		} else {
 			if ok := cacheSetDnsMsg(rmsg, cacheTTL); ok {
@@ -164,42 +180,47 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	return rmsg, err
 }
 
+// FIXME: public function should not here
+func GetMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
+	return getMsgTTL(r, cacheCfg)
+}
+
 func getMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 
-	// FIXME: default ttl should be configurable
 	var ttl uint32 = 0
 
 	if len(r.Answer) > 0 {
 		qtype := r.Question[0].Qtype
-		for _, _rr := range r.Answer {
-			if _rr.Header().Rrtype != qtype {
+		for _, rr := range r.Answer {
+			if rr.Header().Rrtype != qtype {
 				continue
 			}
-			ttl = _rr.Header().Ttl
+			ttl = rr.Header().Ttl
 			break
 		}
 		if ttl == 0 {
 			// only cname, but no qtype record
 			ttl = r.Answer[0].Header().Ttl
 		}
-		if cacheCfg.MinTTL > 0 && ttl < cacheCfg.MinTTL {
-			ttl = cacheCfg.MinTTL
-		} else if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
+
+		if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
 			ttl = cacheCfg.MaxTTL
 		}
 	} else {
-		for _, _rr := range r.Ns {
-			if _rr.Header().Rrtype == dns.TypeSOA {
-				_soa := _rr.(*dns.SOA)
+		for _, rr := range r.Ns {
+			if rr.Header().Rrtype == dns.TypeSOA {
+				_soa := rr.(*dns.SOA)
 				ttl = _soa.Expire
 				if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
 					ttl = cacheCfg.MaxTTL
-				} else if cacheCfg.MinTTL > 0 && ttl < cacheCfg.MinTTL {
-					ttl = cacheCfg.MinTTL
 				}
 				break
 			}
 		}
+	}
+
+	if ttl < cacheCfg.MinTTL {
+		ttl = cacheCfg.MinTTL
 	}
 	return ttl
 }
@@ -209,13 +230,13 @@ func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
 	if err != nil || cacheTTL <= 0 {
 		qname := r.Question[0].Name
 		qtype := r.Question[0].Qtype
-		libnamed.Logger.Error().Str("op_type", "pack_msg").Str("qname", qname).Uint16("qtype", qtype).Err(err).Msg("")
+		libnamed.Logger.Error().Str("op_type", "pack_msg").Str("qname", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
 		return false
 	}
 	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, cacheTTL)
 }
 
-func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, bool) {
+func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
 	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found {
@@ -224,17 +245,17 @@ func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, bool) {
 			// 1. log error
 			// 2. delete cache ?
 			// 3. ignore
-			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("qname", qname).Uint16("qtype", qtype).Err(err).Msg("")
-			return nil, false
+			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("qname", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
+			return nil, expiredUTC, false
 		}
 
 		cacheTTL := getMsgTTL(resp, cacheCfg)
 		replyUpdateTTL(resp, expiredUTC, cacheTTL)
 
-		return resp, true
+		return resp, expiredUTC, true
 	}
 
-	return nil, false
+	return nil, 0, false
 }
 
 func replyUpdateTTL(r *dns.Msg, expiredUTC int64, ttl uint32) {
@@ -254,23 +275,24 @@ func replyUpdateTTL(r *dns.Msg, expiredUTC int64, ttl uint32) {
 	currTTL := uint32(expiredUTC - nowUTC)
 	skipSec := ttl - currTTL
 
-	for i, _ := range r.Answer {
+	for i := range r.Answer {
 		r.Answer[i].Header().Ttl = subTTL(r.Answer[i].Header().Ttl, skipSec)
 	}
 
-	for i, _ := range r.Ns {
+	for i := range r.Ns {
 		r.Ns[i].Header().Ttl = subTTL(r.Ns[i].Header().Ttl, skipSec)
 	}
 
-	for i, _ := range r.Extra {
+	for i := range r.Extra {
 		r.Extra[i].Header().Ttl = subTTL(r.Extra[i].Header().Ttl, skipSec)
 	}
 
 }
 
 func subTTL(ttl uint32, skip uint32) uint32 {
-	if ttl < skip {
-		return 0
+	if ttl <= skip {
+		// some program treat zero ttl as invalid answer, set as 1 increase compatibility
+		return 1
 	} else {
 		return ttl - skip
 	}
@@ -284,23 +306,23 @@ func replyUpdateName(r *dns.Msg, oldname string) {
 	qname := r.Question[0].Name
 	if qname != oldname {
 		// Question SECTION
-		for i, _ := range r.Question {
+		for i := range r.Question {
 			r.Question[i].Name = oldname
 		}
 		// ANSWER SECTION
-		for i, _ := range r.Answer {
+		for i := range r.Answer {
 			if r.Answer[i].Header().Name == qname {
 				r.Answer[i].Header().Name = oldname
 			}
 		}
 		// AUTHORITY SECTION
-		for i, _ := range r.Ns {
+		for i := range r.Ns {
 			if r.Ns[i].Header().Name == qname {
 				r.Ns[i].Header().Name = oldname
 			}
 		}
 		// ADDITIONAL SECTION
-		for i, _ := range r.Extra {
+		for i := range r.Extra {
 			if r.Extra[i].Header().Name == qname {
 				r.Extra[i].Header().Name = oldname
 			}

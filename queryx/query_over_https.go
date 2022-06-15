@@ -2,11 +2,13 @@ package queryx
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"gnamed/configx"
 	"gnamed/libnamed"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"strconv"
@@ -28,6 +30,11 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	_logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoH).Str("doh_msg_type", string(configx.DOHMsgTypeJSON))
 
+	start := time.Now()
+	defer func() {
+		_logEvent.Dur("latency", time.Since(start)).Msg("")
+	}()
+
 	_logEvent.Uint16("id", r.Id)
 
 	rmsg := new(dns.Msg)
@@ -46,45 +53,45 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	req, err := http.NewRequest(doh.Method, dohUrl, nil)
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 
-	if len(doh.Headers) != 0 {
-		req.Header = doh.Headers
+	for hk, hs := range doh.Headers {
+		for _, hv := range hs {
+			req.Header.Add(hk, hv)
+		}
+	}
+
+	if hs, found := doh.Headers["Host"]; found {
+		if len(hs) > 0 {
+			req.Host = hs[0]
+		}
 	}
 	if _, found := doh.Headers["Accept"]; !found {
 		req.Header.Set("Accept", configx.DOHAcceptHeaderTypeJSON)
 	}
 
-	client := &http.Client{
-		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
-	}
-
-	start := time.Now()
-	resp, err := client.Do(req)
+	resp, err := doh.Client.Do(req)
 	if err != nil {
-		_logEvent.Dur("latency", time.Since(start)).Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
+	defer resp.Body.Close()
 
 	_logEvent.Int("status_code", resp.StatusCode)
 	if resp.StatusCode == http.StatusForbidden {
-		_logEvent.Dur("latency", time.Since(start)).Msg("")
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
 	} else if resp.StatusCode != http.StatusOK {
-		_logEvent.Dur("latency", time.Since(start)).Msg("")
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, ErrDoHServerFailure
 	}
 	body, err := ioutil.ReadAll(resp.Body)
-	defer resp.Body.Close()
-	_logEvent.Dur("latency", time.Since(start))
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
@@ -92,7 +99,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	var dohJson libnamed.DOHJson
 	err = json.Unmarshal(body, &dohJson)
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
@@ -110,7 +117,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 		//example.com.              0       IN      A       1.2.3.4
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
-			_logEvent.Err(err).Msg("")
+			_logEvent.Err(err)
 			rmsg.Rcode = dns.RcodeFormatError
 			return rmsg, err
 		}
@@ -119,7 +126,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	for _, ans := range dohJson.Authority {
 		rr, err := dns.NewRR(ans.Name + "\t" + strconv.Itoa(int(ans.TTL)) + "\tIN\t" + dns.TypeToString[ans.Type] + "\t" + ans.Data)
 		if err != nil {
-			_logEvent.Err(err).Msg("")
+			_logEvent.Err(err)
 			rmsg.Rcode = dns.RcodeFormatError
 			return rmsg, err
 		}
@@ -138,7 +145,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	if len(rmsg.Answer) == 0 {
 		rmsg.Rcode = dns.RcodeNameError
 	}
-	_logEvent.Err(err).Msg("")
+	_logEvent.Err(err)
 	return rmsg, err
 }
 
@@ -148,6 +155,10 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 // response body: encoded dns message (bytes), contain Question/Answer/... Sections
 func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	_logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoH).Str("doh_msg_type", string(configx.DOHMsgTypeRFC8484))
+	start := time.Now()
+	defer func() {
+		_logEvent.Dur("latency", time.Since(start)).Msg("")
+	}()
 
 	_logEvent.Uint16("id", r.Id)
 
@@ -156,60 +167,79 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	bmsg, err := r.Pack()
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
-	_logEvent.Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("method", doh.Method).Str("doh_url", doh.Url)
-	req, err := http.NewRequest(doh.Method, doh.Url, bytes.NewReader(bmsg))
+
+	dohUrl := doh.Url
+	var bodyReader io.Reader
+	if doh.Method == "POST" {
+		bodyReader = bytes.NewReader(bmsg)
+	} else if doh.Method == "GET" {
+		dohUrl = doh.Url + "?dns=" + base64.RawURLEncoding.EncodeToString(bmsg)
+		bodyReader = nil
+	}
+	_logEvent.Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("method", doh.Method).Str("doh_url", dohUrl)
+
+	req, err := http.NewRequest(doh.Method, dohUrl, bodyReader)
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
-	if len(doh.Headers) != 0 {
-		req.Header = doh.Headers
+	/*
+		// bug: multi-thread point to same map
+		if len(doh.Headers) != 0 {
+			req.Header = doh.Headers
+		}
+	*/
+
+	for hk, hs := range doh.Headers {
+		for _, hv := range hs {
+			req.Header.Add(hk, hv)
+		}
 	}
+
 	if _, found := doh.Headers["Accept"]; !found {
 		req.Header.Set("Accept", configx.DOHAccetpHeaderTypeRFC8484)
 	}
 
-	client := &http.Client{
-		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
+	if hs, found := doh.Headers["Host"]; found {
+		if len(hs) > 0 {
+			req.Host = hs[0]
+		}
 	}
 
-	start := time.Now()
-	resp, err := client.Do(req)
+	resp, err := doh.Client.Do(req)
 	if err != nil {
-		_logEvent.Dur("latency", time.Since(start)).Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
+	defer resp.Body.Close()
+
 	_logEvent.Int("status_code", resp.StatusCode)
 	if resp.StatusCode == http.StatusForbidden {
-		_logEvent.Dur("latency", time.Since(start)).Msg("")
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
 	} else if resp.StatusCode != http.StatusOK {
-		_logEvent.Dur("latency", time.Since(start)).Msg("")
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, ErrDoHServerFailure
 	}
+
 	body, err := ioutil.ReadAll(resp.Body)
-	defer resp.Body.Close()
-	_logEvent.Dur("latency", time.Since(start))
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 	err = rmsg.Unpack(body)
 	if err != nil {
-		_logEvent.Err(err).Msg("")
+		_logEvent.Err(err)
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
-	_logEvent.Err(err).Msg("")
 	return rmsg, err
 }
 
