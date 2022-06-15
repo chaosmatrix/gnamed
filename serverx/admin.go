@@ -63,6 +63,9 @@ func handleRequestAdminConfig(c *gin.Context) {
 	start := time.Now()
 
 	logEvent := libnamed.Logger.Debug().Str("log_type", "admin")
+	defer func() {
+		logEvent.Dur("latency", time.Since(start)).Msg("")
+	}()
 
 	clientIP := c.ClientIP()
 	logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
@@ -70,7 +73,6 @@ func handleRequestAdminConfig(c *gin.Context) {
 	if c.Request.Method != "GET" && c.Request.Method != "POST" {
 		logEvent.Int("status_code", http.StatusMethodNotAllowed)
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
-		logEvent.Dur("latency", time.Since(start)).Msg("")
 		return
 	}
 
@@ -86,7 +88,7 @@ func handleRequestAdminConfig(c *gin.Context) {
 
 			// rate limit
 			if time.Since(lastTimestamp) < 5*time.Second {
-				logEvent.Bool("rate_limit", true)
+				logEvent.Bool("rate_limit", true).Int("status_code", http.StatusTooManyRequests)
 				c.Header("Retry-After", "5")
 				c.JSON(http.StatusTooManyRequests, AdminResponse{
 					Status: 1,
@@ -95,13 +97,16 @@ func handleRequestAdminConfig(c *gin.Context) {
 				})
 			} else {
 				_, err := updateGlobalConfig()
+				logEvent.Err(err)
 				if err != nil {
+					logEvent.Int("status_code", http.StatusInternalServerError)
 					c.JSON(http.StatusInternalServerError, AdminResponse{
 						Status: 1,
 						Desc:   fmt.Sprintf("failed to update configuration, please make sure the configuration file correct, error: '%v'", err),
 						Msg:    "",
 					})
 				} else {
+					logEvent.Int("status_code", http.StatusOK)
 					cfg = getGlobalConfig()
 					currTimestamp := cfg.GetTimestamp()
 					c.JSON(http.StatusOK, AdminResponse{
@@ -112,6 +117,7 @@ func handleRequestAdminConfig(c *gin.Context) {
 				}
 			}
 		default:
+			logEvent.Int("status_code", http.StatusBadRequest)
 			c.JSON(http.StatusBadRequest, AdminResponse{
 				Status: 1,
 				Desc:   "invalid request",
@@ -120,14 +126,13 @@ func handleRequestAdminConfig(c *gin.Context) {
 			logEvent.Err(errors.New("action not allow"))
 		}
 	} else {
+		logEvent.Int("status_code", http.StatusForbidden)
 		c.JSON(http.StatusForbidden, AdminResponse{
 			Status: 1,
 			Desc:   "auth require",
 			Msg:    "",
 		})
 	}
-
-	logEvent.Dur("latency", time.Since(start)).Msg("")
 }
 
 // admin api special for browser, not compitable with restful api

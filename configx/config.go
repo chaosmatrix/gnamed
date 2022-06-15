@@ -153,9 +153,9 @@ type Timeout struct {
 }
 
 type DnsOpt struct {
-	Dnssec       bool `json:"dnssec"`
-	Ecs          bool `json:"ecs"`
-	RandomDomain bool `json:"randomDomain"`
+	Dnssec       bool `json:"dnssec"`       // enable dnssec
+	Ecs          bool `json:"ecs"`          // enable edns-client-subnet
+	RandomDomain bool `json:"randomDomain"` // randomw Upper/Lower domain's chars
 }
 
 // Server -> View
@@ -235,7 +235,7 @@ func parseConfig(fname string) (Config, error) {
 	cfg.timestamp = time.Now()
 
 	for i := 0; i < len(cfg.Server.Listen); i++ {
-		cfg.Server.Listen[i].parseListen()
+		cfg.Server.Listen[i].parse()
 	}
 
 	if err = cfg.Server.parse(); err != nil {
@@ -268,7 +268,9 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	// verify and defaulting cache configuration options
-	verifyDefaultingCache(&cfg.Server.Cache)
+	if err = cfg.Server.Cache.parse(); err != nil {
+		return cfg, err
+	}
 
 	if err = cfg.Query.parse(); err != nil {
 		return cfg, err
@@ -304,29 +306,43 @@ func (cfg *Config) GetTimestamp() time.Time {
 	return cfg.timestamp
 }
 
-func verifyDefaultingCache(c *Cache) {
+func (c *Cache) parse() error {
 	if c.Mode == "" {
 		c.Mode = CacheModeSkipList
 	} else if c.Mode != CacheModeSkipList && c.Mode != CacheModeHashTable {
 		fmt.Fprintf(os.Stderr, "[+] invalid cache mode '%s' not in %v\n", c.Mode, []string{CacheModeSkipList, CacheModeHashTable})
-		panic(errors.New("invalid cache mode"))
+		return fmt.Errorf("invalid cache mode '%s'", c.Mode)
 	}
+
+	if c.MinTTL > c.MaxTTL {
+		fmt.Fprintf(os.Stderr, "[+] invalid MinTTL %d and MaxTTL %d\n", c.MinTTL, c.MaxTTL)
+		return fmt.Errorf("invalid MinTTL %d and MaxTTL %d", c.MinTTL, c.MaxTTL)
+	}
+
+	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
+		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, will cause cache update every time\n", c.BeforeExpiredSecond, c.MaxTTL)
+	}
+
+	if c.BeforeExpiredSecond < 0 {
+		return fmt.Errorf("invalid beforeExpiredSecond %d < 0", c.BeforeExpiredSecond)
+	}
+
+	return nil
 }
 
-func (l *Listen) parseListen() {
+func (l *Listen) parse() error {
 
 	ip, port, err := net.SplitHostPort(l.Addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' invalid, error: '%s'\n", l.Addr, err)
-		panic(err)
+		return err
 	}
 	portInt, err := strconv.Atoi(port)
 	if err != nil || portInt > 65536 || portInt <= 0 {
-		panic(fmt.Errorf("listen addr '%s' has invalid port, error: '%s'", l.Addr, err))
+		return fmt.Errorf("listen addr '%s' has invalid port, error: '%s'", l.Addr, err)
 	}
 	if _ip := net.ParseIP(ip); _ip == nil {
-		err := fmt.Errorf("listen addr '%s' invalid", l.Addr)
-		panic(err)
+		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
 	}
 	switch l.Protocol {
 	case ProtocolTypeDNS:
@@ -334,22 +350,21 @@ func (l *Listen) parseListen() {
 		case NetworkTypeTcp, NetworkTypeUdp:
 			//
 		default:
-			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-			panic(err)
+			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
 		}
 	case ProtocolTypeDoH, ProtocolTypeDoT:
 		switch l.Network {
 		case NetworkTypeTcp:
 			//
 		default:
-			err := fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-			panic(err)
+			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
 		}
 	default:
-		err := fmt.Errorf("listen addr '%s' protocol '%s' not support", l.Addr, l.Protocol)
-		panic(err)
+		return fmt.Errorf("listen addr '%s' protocol '%s' not support", l.Addr, l.Protocol)
 	}
-	l.Timeout.parseTimeout()
+	l.Timeout.parse()
+
+	return nil
 }
 
 func (cfg *Config) GetSingleFlightGroup(qtype uint16) *libnamed.Group {
@@ -375,7 +390,7 @@ func (mf *Main) parse() error {
 	return nil
 }
 
-func (t *Timeout) parseTimeout() {
+func (t *Timeout) parse() error {
 	_logFunc := func(s string, err error) {
 		if s != "" && err != nil {
 			fmt.Fprintf(os.Stderr, "[+] invalid timeout: '%s', error: '%v', set as default\n", s, err)
@@ -395,6 +410,8 @@ func (t *Timeout) parseTimeout() {
 	setDuration(&t.ConnectDuration, t.Connect, DefaultTimeoutDurationConnect)
 	setDuration(&t.ReadDuration, t.Read, DefaultTimeoutDurationRead)
 	setDuration(&t.WriteDuration, t.Write, DefaultTimeoutDurationWrite)
+
+	return nil
 }
 
 func (srv *Server) parse() error {
@@ -450,7 +467,7 @@ func (dod *DODServer) parse() error {
 		return errInvalidServer
 	}
 
-	dod.Timeout.parseTimeout()
+	dod.Timeout.parse()
 
 	dod.ClientUDP = &dns.Client{
 		// Default buffer size to use to read incoming UDP message
@@ -531,7 +548,7 @@ func (doh *DOHServer) parse() error {
 		doh.Url = urlStruct.String()
 	}
 
-	doh.Timeout.parseTimeout()
+	doh.Timeout.parse()
 
 	client := &http.Client{
 		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
@@ -595,7 +612,7 @@ func (dot *DOTServer) parse() error {
 		dot.Sni = strings.ToLower(strings.TrimRight(host, "."))
 	}
 
-	dot.Timeout.parseTimeout()
+	dot.Timeout.parse()
 
 	dot.Client = &dns.Client{
 		Net: "tcp-tls",
