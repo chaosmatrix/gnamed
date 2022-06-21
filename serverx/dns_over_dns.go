@@ -50,7 +50,6 @@ func serveDoDFunc(listen *configx.Listen, handleFunc func(dns.ResponseWriter, *d
 		ReadTimeout:  listen.Timeout.ConnectDuration,
 		WriteTimeout: listen.Timeout.WriteDuration,
 	}
-
 	dns.HandleFunc(".", handleFunc)
 	return dos.ListenAndServe()
 }

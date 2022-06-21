@@ -33,6 +33,10 @@ func Serve(config *configx.Config, wg *sync.WaitGroup) {
 			serveDoD(sls[i], wg)
 		case configx.ProtocolTypeDoH:
 			serveDoH(sls[i], wg)
+		case configx.ProtocolTypeDoT:
+			serveDoT(sls[i], wg)
+		case configx.ProtocolTypeDoQ:
+			serveDoQ(sls[i], wg)
 		default:
 			logEvent.Err(ErrServerProtocolUnsupport)
 		}

@@ -12,6 +12,7 @@ const (
 	ProtocolTypeDNS = "dns"
 	ProtocolTypeDoH = "https"
 	ProtocolTypeDoT = "tls-tcp"
+	ProtocolTypeDoQ = "quic"
 
 	// TODO
 	CachePassiveEvict = false // evict expired element while get element
@@ -23,6 +24,7 @@ const (
 	DefaultPortDns   = 53
 	DefaultPortDoT   = 853
 	DefaultPortDoH   = 443
+	DefaultPortDoQ   = 784
 	DefaultPortAdmin = 6677
 
 	DefaultTimeoutDurationIdle    = 30 * time.Second

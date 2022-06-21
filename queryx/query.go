@@ -148,16 +148,19 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
 		logEvent.Str("query_type", "query_dns")
-		rmsg, err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, nameserver.Dns)
 	case configx.ProtocolTypeDoH:
 		logEvent.Str("query_type", "query_doh")
-		rmsg, err = queryDoH(r, &nameserver.DoH)
+		rmsg, err = queryDoH(r, nameserver.DoH)
 	case configx.ProtocolTypeDoT:
 		logEvent.Str("query_type", "query_dot")
-		rmsg, err = queryDoT(r, &nameserver.DoT)
+		rmsg, err = queryDoT(r, nameserver.DoT)
+	case configx.ProtocolTypeDoQ:
+		logEvent.Str("query_type", "query_doq")
+		rmsg, err = queryDoQ(r, nameserver.DoQ)
 	default:
 		logEvent.Str("query_type", "query_dns")
-		rmsg, err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, nameserver.Dns)
 	}
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 	// 4. cache response

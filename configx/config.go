@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 )
@@ -84,14 +85,16 @@ type TlsConfig struct {
 
 // Server -> NameServer
 type NameServer struct {
-	Protocol string    `json:"protocol"`
-	Dns      DODServer `json:"dns,omitempty"`
-	DoT      DOTServer `json:"dot,omitempty"`
-	DoH      DOHServer `json:"doh,omitempty"`
+	Protocol string     `json:"protocol"`
+	Dns      *DODServer `json:"dns,omitempty"`
+	DoT      *DOTServer `json:"dot,omitempty"`
+	DoH      *DOHServer `json:"doh,omitempty"`
+	DoQ      *DOQServer `json:"doq,omitempty"`
 }
 
 type DODServer struct {
-	Server  string  `json:"server"`
+	Server string `json:"server"`
+
 	Timeout Timeout `json:"timeout"`
 	DnsOpt  DnsOpt  `json:"dns_opt"`
 
@@ -128,7 +131,6 @@ type DOHServer struct {
 
 type DOTServer struct {
 	Server string `json:"server"`
-	Sni    string `json:"sni"`
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -139,6 +141,23 @@ type DOTServer struct {
 
 	// use internal
 	Client *dns.Client `json:"-"`
+}
+
+// DNS-over-QUIC
+type DOQServer struct {
+	Server string `json:"server"`
+
+	// if "Server" not a ip address, use this nameservers to resolve domain
+	ExternalNameServers []string `json:"externalNameServers"`
+
+	TlsConfig TlsConfig `json:"tls_config"`
+	Timeout   Timeout   `json:"timeout"`
+	DnsOpt    DnsOpt    `json:"dns_opt"`
+
+	// use internal
+	TlsConf  *tls.Config  `json:"-"`
+	QuicConf *quic.Config `json:"-"`
+	Addrs    []string     `json:"-"` // TODO: IP Address Only (both ipv4 and ipv6), domain not allow
 }
 
 type Timeout struct {
@@ -432,6 +451,8 @@ func (srv *Server) parse() error {
 				err = ns.DoH.parse()
 			case ProtocolTypeDoT:
 				err = ns.DoT.parse()
+			case ProtocolTypeDoQ:
+				err = ns.DoQ.parse()
 			default:
 				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", vi.NameServerTag, ns.Protocol)
 				res = false
@@ -578,38 +599,15 @@ func (doh *DOHServer) parse() error {
 
 // FIXME: dot.Server was a config file, should not be change.
 func (dot *DOTServer) parse() error {
-	errInvalidServer := fmt.Errorf("invalid dns-over-tls server address '%s'", dot.Server)
-	host, portStr, err := net.SplitHostPort(dot.Server)
+	server, host, err := parseServer(dot.Server, dot.ExternalNameServers, DefaultPortDoT)
 	if err != nil {
-		host = dot.Server
-		portStr = strconv.Itoa(DefaultPortDoT)
-		dot.Server = net.JoinHostPort(dot.Server, portStr)
-	} else {
-		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
-			return errInvalidServer
-		}
+		return err
 	}
+	dot.Server = server
 
-	if net.ParseIP(host) == nil {
-		dot.Server = ""
-		// domain, lookupIP
-		host = dns.Fqdn(host)
-		if libnamed.ValidateDomain(host) {
-			host = lookupIP(host, dot.ExternalNameServers)
-			if len(host) != 0 {
-				dot.Server = net.JoinHostPort(host, portStr)
-			} else {
-				return fmt.Errorf("server '%s' no valid ip address found", dot.Server)
-			}
-		}
-	}
-
-	if dot.Server == "" {
-		return errInvalidServer
-	}
-
-	if dot.Sni == "" {
-		dot.Sni = strings.ToLower(strings.TrimRight(host, "."))
+	sni := dot.TlsConfig.ServerName
+	if sni == "" {
+		sni = strings.ToLower(strings.TrimRight(host, "."))
 	}
 
 	dot.Timeout.parse()
@@ -617,7 +615,7 @@ func (dot *DOTServer) parse() error {
 	dot.Client = &dns.Client{
 		Net: "tcp-tls",
 		TLSConfig: &tls.Config{
-			ServerName: dot.TlsConfig.ServerName,
+			ServerName: sni,
 		},
 
 		DialTimeout:  dot.Timeout.ConnectDuration,
@@ -629,6 +627,55 @@ func (dot *DOTServer) parse() error {
 	return nil
 }
 
+// FIXME: dot.Server was a config file, should not be change.
+func (doq *DOQServer) parse() error {
+	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, DefaultPortDoQ)
+	if err != nil {
+		return err
+	}
+	doq.Server = server
+
+	sni := doq.TlsConfig.ServerName
+	if sni == "" {
+		sni = strings.ToLower(strings.TrimRight(host, "."))
+	}
+
+	doq.Timeout.parse()
+
+	// internal
+	doq.TlsConf = &tls.Config{
+		ServerName: sni,
+		NextProtos: []string{"doq-i02", "doq-i00", "dq", "doq"},
+	}
+	doq.QuicConf = &quic.Config{
+		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
+	}
+
+	return nil
+}
+
+func parseServer(server string, nameservers []string, defaultPort int) (string, string, error) {
+
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		host = server
+		port = strconv.Itoa(defaultPort)
+		server = net.JoinHostPort(server, port)
+	}
+
+	if net.ParseIP(host) == nil {
+		if libnamed.ValidateDomain(host) {
+			addr := lookupIP(dns.Fqdn(host), nameservers)
+			if len(addr) == 0 {
+				return server, host, fmt.Errorf("server '%s' no valid ip address found", server)
+			}
+			server = net.JoinHostPort(addr, port)
+		}
+	}
+
+	return server, host, err
+}
+
 func lookupIP(name string, nameservers []string) string {
 	nss := nameservers
 	if len(nss) == 0 {
@@ -636,7 +683,7 @@ func lookupIP(name string, nameservers []string) string {
 	}
 	for _, ns := range nss {
 		r := new(dns.Msg)
-		r.SetQuestion(name, dns.TypeA)
+		r.SetQuestion(dns.Fqdn(name), dns.TypeA)
 		client := dns.Client{
 			Timeout: 5 * time.Second,
 		}
