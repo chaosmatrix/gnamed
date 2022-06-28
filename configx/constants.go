@@ -32,6 +32,10 @@ const (
 	DefaultTimeoutDurationRead    = 5 * time.Second
 	DefaultTimeoutDurationWrite   = 5 * time.Second
 
+	DefaultPoolIdleTimeoutDuration = 30 * time.Second
+	DefaultPoolWaitTimeoutDuration = 3 * time.Second
+	DefaultPoolSize                = 5
+
 	DefaultDnsOptDnssec       = false
 	DefaultDnsOptEcs          = false
 	DefaultDnsOptRandomDomain = false

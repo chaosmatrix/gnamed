@@ -93,14 +93,17 @@ type NameServer struct {
 }
 
 type DODServer struct {
-	Server string `json:"server"`
+	Server  string `json:"server"`
+	Network string `json:"network"`
 
-	Timeout Timeout `json:"timeout"`
-	DnsOpt  DnsOpt  `json:"dns_opt"`
+	Timeout Timeout         `json:"timeout"`
+	DnsOpt  DnsOpt          `json:"dns_opt"`
+	Pool    *ConnectionPool `json:"pool"`
 
 	// use internal
-	ClientUDP *dns.Client `json:"-"`
-	ClientTCP *dns.Client `json:"-"`
+	ClientUDP         *dns.Client                 `json:"-"`
+	ClientTCP         *dns.Client                 `json:"-"`
+	ConnectionPoolTCP *libnamed.DnsConnectionPool `json:"-"`
 }
 
 type DOHMsgType string
@@ -130,7 +133,8 @@ type DOHServer struct {
 }
 
 type DOTServer struct {
-	Server string `json:"server"`
+	Server string          `json:"server"`
+	Pool   *ConnectionPool `json:"pool"`
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -140,7 +144,8 @@ type DOTServer struct {
 	DnsOpt    DnsOpt    `json:"dns_opt"`
 
 	// use internal
-	Client *dns.Client `json:"-"`
+	Client         *dns.Client                 `json:"-"`
+	ConnectionPool *libnamed.DnsConnectionPool `json:"-"`
 }
 
 // DNS-over-QUIC
@@ -169,6 +174,14 @@ type Timeout struct {
 	ReadDuration    time.Duration `json:"-"`
 	Write           string        `json:"write"`
 	WriteDuration   time.Duration `json:"-"`
+}
+
+type ConnectionPool struct {
+	IdleTimeout         string        `json:"idle"`
+	idleTimeoutDuration time.Duration `json:"-"`
+	WaitTimeout         string        `json:"waitTimeout"`
+	waitTimeoutDuration time.Duration `json:"-"`
+	Size                int           `json:"size"`
 }
 
 type DnsOpt struct {
@@ -433,6 +446,38 @@ func (t *Timeout) parse() error {
 	return nil
 }
 
+func (cp *ConnectionPool) parse() error {
+	if cp == nil {
+		return nil
+	}
+
+	if cp.Size == 0 {
+		cp.Size = DefaultPoolSize
+	}
+
+	if cp.IdleTimeout == "" {
+		cp.idleTimeoutDuration = DefaultPoolIdleTimeoutDuration
+	} else {
+		if d, err := time.ParseDuration(cp.IdleTimeout); err != nil {
+			return err
+		} else {
+			cp.idleTimeoutDuration = d
+		}
+	}
+
+	if cp.WaitTimeout == "" {
+		cp.waitTimeoutDuration = DefaultPoolWaitTimeoutDuration
+	} else {
+		if d, err := time.ParseDuration(cp.WaitTimeout); err != nil {
+			return err
+		} else {
+			cp.waitTimeoutDuration = d
+		}
+	}
+
+	return nil
+}
+
 func (srv *Server) parse() error {
 	res := true
 
@@ -490,16 +535,18 @@ func (dod *DODServer) parse() error {
 
 	dod.Timeout.parse()
 
-	dod.ClientUDP = &dns.Client{
-		// Default buffer size to use to read incoming UDP message
-		// default 512 B
-		// must increase if edns-client-sub enable
-		UDPSize:      1024,
-		Net:          "udp",
-		DialTimeout:  dod.Timeout.ConnectDuration,
-		ReadTimeout:  dod.Timeout.ReadDuration,
-		WriteTimeout: dod.Timeout.WriteDuration,
-		//SingleInflight: true,
+	if dod.Network != "tcp" {
+		dod.ClientUDP = &dns.Client{
+			// Default buffer size to use to read incoming UDP message
+			// default 512 B
+			// must increase if edns-client-sub enable
+			UDPSize:      1024,
+			Net:          "udp",
+			DialTimeout:  dod.Timeout.ConnectDuration,
+			ReadTimeout:  dod.Timeout.ReadDuration,
+			WriteTimeout: dod.Timeout.WriteDuration,
+			//SingleInflight: true,
+		}
 	}
 
 	dod.ClientTCP = &dns.Client{
@@ -514,6 +561,15 @@ func (dod *DODServer) parse() error {
 		//SingleInflight: true,
 	}
 
+	if dod.Network == "tcp" {
+		if err := dod.Pool.parse(); err != nil {
+			return err
+		}
+		// only tcp enable connection pool
+		dod.ConnectionPoolTCP = libnamed.NewDnsConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+			return dod.ClientTCP.Dial(dod.Server)
+		})
+	}
 	return nil
 }
 
@@ -624,6 +680,15 @@ func (dot *DOTServer) parse() error {
 		//SingleInflight: true,
 	}
 
+	if dot.Pool != nil {
+		if err := dot.Pool.parse(); err != nil {
+			return err
+		}
+
+		dot.ConnectionPool = libnamed.NewDnsConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+			return dot.Client.Dial(dot.Server)
+		})
+	}
 	return nil
 }
 
