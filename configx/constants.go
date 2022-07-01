@@ -1,6 +1,8 @@
 package configx
 
-import "time"
+import (
+	"time"
+)
 
 const (
 	ResolveTypeForward = "forward"

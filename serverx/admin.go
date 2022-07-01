@@ -8,8 +8,10 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"gnamed/queryx"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -237,7 +239,14 @@ func serveAdminFunc(listen configx.Listen) {
 	// r = gin.Default()
 	// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	if os.Getenv(envGinDisableLog) == "" {
+		r.Use(gin.Logger(), gin.Recovery())
+	} else {
+		r.Use(gin.Recovery())
+		gin.DefaultWriter = ioutil.Discard
+		//gin.DefaultErrorWriter = ioutil.Discard
+	}
+	//gin.SetMode(gin.ReleaseMode)
 
 	cachePath := path.Join(listen.DohPath, "/cache/:action")
 	r.GET(cachePath, handleRequestAdminCache)

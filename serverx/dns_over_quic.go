@@ -13,6 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+const (
+	maxMsgSize = 1500
+)
+
 func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func(addr string, network string) {
@@ -34,7 +38,7 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 		// 1500 should be enough
 		bytesPool := &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 1500)
+				return make([]byte, maxMsgSize)
 			},
 		}
 
@@ -48,8 +52,6 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 			go func(conn quic.Connection) {
 				logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
 				start := time.Now()
-				// BUG: latency incorrect, will always zero
-				//defer logEvent.Dur("latency", time.Since(start)).Msg("")
 				defer func() {
 					logEvent.Dur("latency", time.Since(start)).Msg("")
 				}()
@@ -68,8 +70,9 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 					return
 				}
 				r := new(dns.Msg)
-				if err = r.Unpack(bs[:n]); err != nil {
+				if err = r.Unpack(bs[:n]); err != nil || n == maxMsgSize {
 					logEvent.Err(err)
+					stream.Write(replyServerFailure(r))
 					return
 				}
 				bytesPool.Put(bs)
@@ -91,4 +94,20 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 		}
 		wg.Done()
 	}(listen.Addr, listen.Network)
+}
+
+func replyServerFailure(r *dns.Msg) []byte {
+	if r == nil || len(r.Question) == 0 {
+		return []byte{}
+	}
+	resp := new(dns.Msg)
+	resp.SetReply(r)
+	resp.Opcode = dns.RcodeServerFailure
+
+	bmsg, err := resp.Pack()
+	if err != nil {
+		return []byte{}
+	}
+
+	return bmsg
 }

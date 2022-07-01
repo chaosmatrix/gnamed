@@ -38,7 +38,7 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 	}
 
 	// enable singleflight
-	singleflightGroup := config.GetSingleFlightGroup(r.Question[0].Qtype)
+	singleflightGroup := config.GetSingleFlightGroup(r.Question[0].Qclass, r.Question[0].Qtype)
 	f := func() (*dns.Msg, error) {
 		return query(r, config, logEvent, false)
 	}
@@ -129,7 +129,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	if nameserver == nil {
 		// reply from hosts file
 		_record, _ := config.Server.FindRecordFromHosts(qname, qtype)
-		_msg := strings.Join([]string{origName, "60", "IN", qtype, _record}, "    ")
+		_msg := strings.Join([]string{origName, "60", dns.ClassToString[r.Question[0].Qclass], qtype, _record}, "    ")
 
 		logEvent.Str("query_type", "hosts")
 		rmsg := new(dns.Msg)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"gnamed/libnamed"
 	"io/ioutil"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,14 +36,14 @@ var (
 )
 
 type Config struct {
-	filename           string            `json:"-"` // current using configuration file name
-	timestamp          time.Time         `json:"-"` // configuration file parse timestamp
-	lock               *sync.Mutex       `json:"-"` // internal use, lazy init some values
-	singleflightGroups []*libnamed.Group `json:"-"` // max size 1<<16
-	Server             Server            `json:"server"`
-	Query              Query             `json:"query"`
-	Admin              Admin             `json:"admin"`
-	Files              Files             `json:"files"`
+	filename           string              `json:"-"` // current using configuration file name
+	timestamp          time.Time           `json:"-"` // configuration file parse timestamp
+	lock               *sync.Mutex         `json:"-"` // internal use, lazy init some values
+	singleflightGroups [][]*libnamed.Group `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
+	Server             Server              `json:"server"`
+	Query              Query               `json:"query"`
+	Admin              Admin               `json:"admin"`
+	Files              Files               `json:"files"`
 }
 
 type Server struct {
@@ -77,10 +78,10 @@ type Listen struct {
 }
 
 type TlsConfig struct {
-	ServerName string `json:"serverName"`
-
-	CertFile string `json:"certFile"`
-	KeyFile  string `json:"keyFile"`
+	ServerName         string `json:"serverName"`
+	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
+	CertFile           string `json:"certFile"`
+	KeyFile            string `json:"keyFile"`
 }
 
 // Server -> NameServer
@@ -267,7 +268,9 @@ func parseConfig(fname string) (Config, error) {
 	cfg.timestamp = time.Now()
 
 	for i := 0; i < len(cfg.Server.Listen); i++ {
-		cfg.Server.Listen[i].parse()
+		if err = cfg.Server.Listen[i].parse(); err != nil {
+			return cfg, err
+		}
 	}
 
 	if err = cfg.Server.parse(); err != nil {
@@ -295,7 +298,9 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	if cfg.Server.Main.Singleflight {
-		cfg.singleflightGroups = make([]*libnamed.Group, 1<<16)
+		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
+		// [(1<<16) - 1][(1<<16) - 1]*libnamed.Group
+		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16)
 		cfg.lock = new(sync.Mutex) // initialize global lock
 	}
 
@@ -376,43 +381,34 @@ func (l *Listen) parse() error {
 	if _ip := net.ParseIP(ip); _ip == nil {
 		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
 	}
-	switch l.Protocol {
-	case ProtocolTypeDNS:
-		switch l.Network {
-		case NetworkTypeTcp, NetworkTypeUdp:
-			//
-		default:
-			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-		}
-	case ProtocolTypeDoH, ProtocolTypeDoT:
-		switch l.Network {
-		case NetworkTypeTcp:
-			//
-		default:
-			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-		}
-	default:
-		return fmt.Errorf("listen addr '%s' protocol '%s' not support", l.Addr, l.Protocol)
-	}
-	l.Timeout.parse()
 
-	return nil
+	return l.Timeout.parse()
 }
 
-func (cfg *Config) GetSingleFlightGroup(qtype uint16) *libnamed.Group {
-	if cfg.singleflightGroups[qtype] == nil {
-		// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
-		// make sure value only inittialize once
-		// make sure waiting concurrency caller get valid and correct value
+func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.Group {
+	// lazy initialize
+	// 1. empty singleflightGroups memory usage: 65535 * sizeof(nil)
+	if len(cfg.singleflightGroups[qclass]) == 0 {
 		cfg.lock.Lock()
-		if cfg.singleflightGroups[qtype] == nil {
-			// double check
-			cfg.singleflightGroups[qtype] = new(libnamed.Group)
+		if len(cfg.singleflightGroups[qclass]) == 0 {
+			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16)
+			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
+	} else {
+		if cfg.singleflightGroups[qclass][qtype] == nil {
+			// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
+			// make sure value only inittialize once
+			// make sure waiting concurrency caller get valid and correct value
+			cfg.lock.Lock()
+			if cfg.singleflightGroups[qclass][qtype] == nil {
+				// double check
+				cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
+			}
+			cfg.lock.Unlock()
+		}
 	}
-
-	return cfg.singleflightGroups[qtype]
+	return cfg.singleflightGroups[qclass][qtype]
 }
 
 func (mf *Main) parse() error {
@@ -634,7 +630,8 @@ func (doh *DOHServer) parse() error {
 	if doh.TlsConfig.ServerName != "" {
 		tr := &http.Transport{
 			TLSClientConfig: &tls.Config{
-				ServerName: doh.TlsConfig.ServerName,
+				ServerName:         doh.TlsConfig.ServerName,
+				InsecureSkipVerify: doh.TlsConfig.InsecureSkipVerify,
 			},
 			ForceAttemptHTTP2: true,
 			Proxy:             http.ProxyFromEnvironment,
@@ -671,7 +668,8 @@ func (dot *DOTServer) parse() error {
 	dot.Client = &dns.Client{
 		Net: "tcp-tls",
 		TLSConfig: &tls.Config{
-			ServerName: sni,
+			ServerName:         sni,
+			InsecureSkipVerify: dot.TlsConfig.InsecureSkipVerify,
 		},
 
 		DialTimeout:  dot.Timeout.ConnectDuration,
@@ -709,8 +707,9 @@ func (doq *DOQServer) parse() error {
 
 	// internal
 	doq.TlsConf = &tls.Config{
-		ServerName: sni,
-		NextProtos: []string{"doq-i02", "doq-i00", "dq", "doq"},
+		ServerName:         sni,
+		NextProtos:         []string{"doq-i02", "doq-i00", "dq", "doq"},
+		InsecureSkipVerify: doq.TlsConfig.InsecureSkipVerify,
 	}
 	doq.QuicConf = &quic.Config{
 		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
