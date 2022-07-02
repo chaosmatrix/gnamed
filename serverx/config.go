@@ -25,16 +25,16 @@ func updateGlobalConfig() (*configx.Config, error) {
 	fname := globalServerConfig.configs[globalServerConfig.currId].GetFileName()
 	cfg, err := configx.ParseConfig(fname)
 	if err != nil {
-		return &cfg, err
+		return cfg, err
 	}
 
 	// create new pointer point to new value
 	// rather than update original pointer's value
 	// not affect exist value
-	globalServerConfig.configs[idx] = &cfg
+	globalServerConfig.configs[idx] = cfg
 
 	// make sure currId updated after configuration updated, so that lock-free for read
 	globalServerConfig.currId = idx
 
-	return &cfg, err
+	return cfg, err
 }

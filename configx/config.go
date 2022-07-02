@@ -38,7 +38,7 @@ var (
 type Config struct {
 	filename           string              `json:"-"` // current using configuration file name
 	timestamp          time.Time           `json:"-"` // configuration file parse timestamp
-	lock               *sync.Mutex         `json:"-"` // internal use, lazy init some values
+	lock               sync.Mutex          `json:"-"` // internal use, lazy init some values
 	singleflightGroups [][]*libnamed.Group `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
 	Server             Server              `json:"server"`
 	Query              Query               `json:"query"`
@@ -79,7 +79,7 @@ type Listen struct {
 
 type TlsConfig struct {
 	ServerName         string `json:"serverName"`
-	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
+	InsecureSkipVerify bool   `json:"insecure"`
 	CertFile           string `json:"certFile"`
 	KeyFile            string `json:"keyFile"`
 }
@@ -250,16 +250,16 @@ type Files struct {
 	EcsIpList string
 }
 
-func ParseConfig(fname string) (Config, error) {
+func ParseConfig(fname string) (*Config, error) {
 	return parseConfig(fname)
 }
-func parseConfig(fname string) (Config, error) {
-	var cfg Config
+func parseConfig(fname string) (*Config, error) {
+	cfg := new(Config)
 	fbs, err := ioutil.ReadFile(fname)
 	if err != nil {
 		return cfg, err
 	}
-	err = json.Unmarshal(fbs, &cfg)
+	err = json.Unmarshal(fbs, cfg)
 	if err != nil {
 		return cfg, err
 	}
@@ -278,6 +278,10 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	// view -> FQDN
+	// default view "." must exist
+	if _, found := cfg.Server.View["."]; !found {
+		return cfg, fmt.Errorf("default view \".\" not exist")
+	}
 	for vk, vv := range cfg.Server.View {
 		if vv.Cname != "" {
 			vv.Cname = dns.Fqdn(vv.Cname)
@@ -301,7 +305,6 @@ func parseConfig(fname string) (Config, error) {
 		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
 		// [(1<<16) - 1][(1<<16) - 1]*libnamed.Group
 		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16)
-		cfg.lock = new(sync.Mutex) // initialize global lock
 	}
 
 	// verify and defaulting cache configuration options

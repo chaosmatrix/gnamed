@@ -2,6 +2,7 @@ package queryx
 
 import (
 	"errors"
+	"fmt"
 	"gnamed/cachex"
 	"gnamed/configx"
 	"gnamed/libnamed"
@@ -22,16 +23,28 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 		libnamed.Logger.Error().Err(err).Msg("")
 		return nil, err
 	}
+
+	logEvent.Uint16("id", r.Id)
 	if len(r.Question) == 0 {
-		err = errors.New("dns message hasn't valid question")
-		libnamed.Logger.Error().Uint16("id", r.Id).Err(err).Msg("")
-		r.SetReply(r)
-		r.Rcode = dns.RcodeFormatError
-		return r, err
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, fmt.Errorf("invalid dns query")
 	}
+
 	origName := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
-	logEvent.Uint16("id", r.Id).Str("orig_name", origName).Str("qtype", qtype)
+	qclass := dns.ClassToString[r.Question[0].Qclass]
+
+	logEvent.Str("orig_name", origName).Str("qtype", qtype).Str("qclass", qclass)
+
+	if qtype == "" || qclass == "" {
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, fmt.Errorf("invalid dns query")
+	}
+
 	// disable singleflight
 	if !config.Server.Main.Singleflight {
 		return query(r, config, logEvent, false)
@@ -71,13 +84,11 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	if !libnamed.ValidateDomain(origName) {
 		r.SetReply(r)
 		r.Rcode = dns.RcodeFormatError
-		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode]).Err(errors.New("invalid domain base on RFC 1035 and RFC 3696"))
-		return r, err
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode])
+		return r, fmt.Errorf("invalid domain base on RFC 1035 and RFC 3696")
 	}
 
-	// Cache
-	// 0. lock - ensure single flying query or internal search
-	// 1. whitelist/blacklist search
+	// 2. whitelist/blacklist search
 	if _r, _s, _forbidden := config.Query.QueryForbidden(origName, qtype); _forbidden {
 		rmsg, err := queryFake(r, nil)
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", _r+"_"+_s)
@@ -96,7 +107,7 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 
 	logEvent.Str("qname", qname)
 
-	// 2. cache search
+	// 3. cache search
 	if !byPassCache {
 		cacheCfg := config.Server.Cache
 		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && expiredUTC > 0) {
@@ -122,24 +133,31 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	} else {
 		logEvent.Bool("by_pass_cache", byPassCache)
 	}
-	// 3. external query
-	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
-	logEvent.Str("nameserver_tag", nameServerTag)
 
-	if nameserver == nil {
-		// reply from hosts file
-		_record, _ := config.Server.FindRecordFromHosts(qname, qtype)
-		_msg := strings.Join([]string{origName, "60", dns.ClassToString[r.Question[0].Qclass], qtype, _record}, "    ")
-
+	// 4. hosts lookup
+	if record, found := config.Server.FindRecordFromHosts(qname, qtype); found {
 		logEvent.Str("query_type", "hosts")
 		rmsg := new(dns.Msg)
-		_rr, _err := dns.NewRR(_msg)
+		rrs := strings.Join([]string{origName, "60", dns.ClassToString[r.Question[0].Qclass], qtype, record}, "    ")
+		_rr, _err := dns.NewRR(rrs)
 		if _err != nil {
 			return nil, _err
 		}
 		rmsg.Answer = []dns.RR{_rr}
 		setReply(rmsg, r, origName)
 		return rmsg, nil
+	}
+
+	// 5. external query
+	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
+	logEvent.Str("nameserver_tag", nameServerTag)
+
+	if nameserver == nil {
+		// shouldn't reach here
+		rmsg := new(dns.Msg)
+		setReply(rmsg, r, origName)
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, fmt.Errorf("no avaliable view match name \"%s\"", origName)
 	}
 
 	var rmsg *dns.Msg
@@ -197,6 +215,10 @@ func GetMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 func getMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 
 	var ttl uint32 = 0
+
+	if r == nil {
+		return ttl
+	}
 
 	if len(r.Answer) > 0 {
 		qtype := r.Question[0].Qtype
