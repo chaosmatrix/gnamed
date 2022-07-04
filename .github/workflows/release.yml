@@ -21,7 +21,7 @@ jobs:
           GOOS: darwin
           GOARCH: amd64
         run: |
-          go build -o ${GITHUB_REPOSITORY##*/}
+          go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}
           tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json
           rm -f ${GITHUB_REPOSITORY##*/}
           sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
@@ -32,7 +32,7 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          go build -o ${GITHUB_REPOSITORY##*/}
+          go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}
           tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json
           rm -f ${GITHUB_REPOSITORY##*/}
           sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
@@ -43,7 +43,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          go build -o ${GITHUB_REPOSITORY##*/}.exe
+          go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}.exe
           tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/}.exe configx/config.json
           rm -f ${GITHUB_REPOSITORY##*/}.exe
           sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
