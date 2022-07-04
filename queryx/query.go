@@ -2,6 +2,7 @@ package queryx
 
 import (
 	"errors"
+	"fmt"
 	"gnamed/cachex"
 	"gnamed/configx"
 	"gnamed/libnamed"
@@ -22,23 +23,35 @@ func Query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event) (*dns.Ms
 		libnamed.Logger.Error().Err(err).Msg("")
 		return nil, err
 	}
+
+	logEvent.Uint16("id", r.Id)
 	if len(r.Question) == 0 {
-		err = errors.New("dns message hasn't valid question")
-		libnamed.Logger.Error().Uint16("id", r.Id).Err(err).Msg("")
-		r.SetReply(r)
-		r.Rcode = dns.RcodeFormatError
-		return r, err
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, fmt.Errorf("invalid dns query")
 	}
+
 	origName := r.Question[0].Name
 	qtype := dns.TypeToString[r.Question[0].Qtype]
-	logEvent.Uint16("id", r.Id).Str("orig_name", origName).Str("qtype", qtype)
+	qclass := dns.ClassToString[r.Question[0].Qclass]
+
+	logEvent.Str("orig_name", origName).Str("qtype", qtype).Str("qclass", qclass)
+
+	if qtype == "" || qclass == "" {
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeFormatError
+		return rmsg, fmt.Errorf("invalid dns query")
+	}
+
 	// disable singleflight
 	if !config.Server.Main.Singleflight {
 		return query(r, config, logEvent, false)
 	}
 
 	// enable singleflight
-	singleflightGroup := config.GetSingleFlightGroup(r.Question[0].Qtype)
+	singleflightGroup := config.GetSingleFlightGroup(r.Question[0].Qclass, r.Question[0].Qtype)
 	f := func() (*dns.Msg, error) {
 		return query(r, config, logEvent, false)
 	}
@@ -71,13 +84,11 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	if !libnamed.ValidateDomain(origName) {
 		r.SetReply(r)
 		r.Rcode = dns.RcodeFormatError
-		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode]).Err(errors.New("invalid domain base on RFC 1035 and RFC 3696"))
-		return r, err
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode])
+		return r, fmt.Errorf("invalid domain base on RFC 1035 and RFC 3696")
 	}
 
-	// Cache
-	// 0. lock - ensure single flying query or internal search
-	// 1. whitelist/blacklist search
+	// 2. whitelist/blacklist search
 	if _r, _s, _forbidden := config.Query.QueryForbidden(origName, qtype); _forbidden {
 		rmsg, err := queryFake(r, nil)
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", _r+"_"+_s)
@@ -96,20 +107,32 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 
 	logEvent.Str("qname", qname)
 
-	// 2. cache search
+	// 3. cache search
 	if !byPassCache {
 		cacheCfg := config.Server.Cache
-		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && expiredUTC > 0) {
-			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && expiredUTC-libnamed.GetFakeTimerUnixSecond() <= cacheCfg.BeforeExpiredSecond {
-				logEvent.Bool("background_update", true)
-				// do background query
-				go func(nr *dns.Msg) {
-					_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype])
-					// bypass singflight & cache
-					_, nerr := query(nr, config, _logEvent, true)
-					_logEvent.Err(nerr).Msg("")
-				}(r.Copy())
+		if rmsg, expiredUTC, cacheTTL, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && rmsg != nil && expiredUTC > 0) {
+			nowUTC := libnamed.GetFakeTimerUnixSecond()
+			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && ((cacheCfg.BeforeExpiredSecond > 0 && expiredUTC-cacheCfg.BeforeExpiredSecond <= nowUTC) || (cacheCfg.BeforeExpiredPercent > 0 && expiredUTC-int64((float64(cacheTTL)*cacheCfg.BeforeExpiredPercent)) <= nowUTC)) {
+
+				lockKey := qname + "_" + dns.ClassToString[r.Question[0].Qclass] + "_" + qtype
+				if cacheCfg.BackgroundQueryTryLock(lockKey) {
+					// ensure only one outgoing same query (qname, qclass, qtype)
+					logEvent.Bool("background_update", true)
+					// do background query
+					go func(nr *dns.Msg, lockKey string) {
+						defer cacheCfg.BackgroundQueryUnlock(lockKey)
+						_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype]).Str("qclass", dns.ClassToString[nr.Question[0].Qclass])
+						// bypass singleflight & cache
+						// if not bypass singleflight, depend on schedule, background query might reply from cache itself:
+						// background query execute before reply from cache
+						// if curr query include all same querys blocking by singleflight have completed and background query hasn't completed,
+						// might be more than one outgoing same query
+						_, nerr := query(nr, config, _logEvent, true)
+						_logEvent.Err(nerr).Msg("")
+					}(r.Copy(), lockKey)
+				}
 			}
+
 			logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode])
 			if found {
 				logEvent.Str("cache", "hit")
@@ -122,18 +145,13 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	} else {
 		logEvent.Bool("by_pass_cache", byPassCache)
 	}
-	// 3. external query
-	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
-	logEvent.Str("nameserver_tag", nameServerTag)
 
-	if nameserver == nil {
-		// reply from hosts file
-		_record, _ := config.Server.FindRecordFromHosts(qname, qtype)
-		_msg := strings.Join([]string{origName, "60", "IN", qtype, _record}, "    ")
-
+	// 4. hosts lookup
+	if record, found := config.Server.FindRecordFromHosts(qname, qtype); found {
 		logEvent.Str("query_type", "hosts")
 		rmsg := new(dns.Msg)
-		_rr, _err := dns.NewRR(_msg)
+		rrs := strings.Join([]string{origName, "60", dns.ClassToString[r.Question[0].Qclass], qtype, record}, "    ")
+		_rr, _err := dns.NewRR(rrs)
 		if _err != nil {
 			return nil, _err
 		}
@@ -142,22 +160,37 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 		return rmsg, nil
 	}
 
+	// 5. external query
+	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
+	logEvent.Str("nameserver_tag", nameServerTag)
+
+	if nameserver == nil {
+		// shouldn't reach here
+		rmsg := new(dns.Msg)
+		setReply(rmsg, r, origName)
+		rmsg.Rcode = dns.RcodeServerFailure
+		return rmsg, fmt.Errorf("no avaliable view match name \"%s\"", origName)
+	}
+
 	var rmsg *dns.Msg
 
 	queryStartTime := time.Now()
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
 		logEvent.Str("query_type", "query_dns")
-		rmsg, err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, nameserver.Dns)
 	case configx.ProtocolTypeDoH:
 		logEvent.Str("query_type", "query_doh")
-		rmsg, err = queryDoH(r, &nameserver.DoH)
+		rmsg, err = queryDoH(r, nameserver.DoH)
 	case configx.ProtocolTypeDoT:
 		logEvent.Str("query_type", "query_dot")
-		rmsg, err = queryDoT(r, &nameserver.DoT)
+		rmsg, err = queryDoT(r, nameserver.DoT)
+	case configx.ProtocolTypeDoQ:
+		logEvent.Str("query_type", "query_doq")
+		rmsg, err = queryDoQ(r, nameserver.DoQ)
 	default:
 		logEvent.Str("query_type", "query_dns")
-		rmsg, err = queryDoD(r, &nameserver.Dns)
+		rmsg, err = queryDoD(r, nameserver.Dns)
 	}
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 	// 4. cache response
@@ -194,6 +227,10 @@ func GetMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 func getMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 
 	var ttl uint32 = 0
+
+	if r == nil {
+		return ttl
+	}
 
 	if len(r.Answer) > 0 {
 		qtype := r.Question[0].Qtype
@@ -242,7 +279,7 @@ func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
 	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, cacheTTL)
 }
 
-func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool) {
+func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, uint32, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
 	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {
@@ -252,16 +289,16 @@ func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool)
 			// 2. delete cache ?
 			// 3. ignore
 			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("qname", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
-			return nil, expiredUTC, false
+			return nil, 0, 0, false
 		}
 
 		cacheTTL := getMsgTTL(resp, cacheCfg)
 		replyUpdateTTL(resp, expiredUTC, cacheTTL)
 
-		return resp, expiredUTC, found
+		return resp, expiredUTC, cacheTTL, found
 	}
 
-	return nil, 0, false
+	return nil, 0, 0, false
 }
 
 func replyUpdateTTL(r *dns.Msg, expiredUTC int64, ttl uint32) {

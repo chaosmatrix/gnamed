@@ -174,9 +174,9 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	dohUrl := doh.Url
 	var bodyReader io.Reader
-	if doh.Method == "POST" {
+	if doh.Method == http.MethodPost {
 		bodyReader = bytes.NewReader(bmsg)
-	} else if doh.Method == "GET" {
+	} else if doh.Method == http.MethodGet {
 		dohUrl = doh.Url + "?dns=" + base64.RawURLEncoding.EncodeToString(bmsg)
 		bodyReader = nil
 	}
@@ -198,17 +198,18 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 	for hk, hs := range doh.Headers {
 		for _, hv := range hs {
 			req.Header.Add(hk, hv)
+
+			if http.CanonicalHeaderKey(hk) == "Host" {
+				req.Host = hv
+			}
 		}
 	}
 
-	if _, found := doh.Headers["Accept"]; !found {
-		req.Header.Set("Accept", configx.DOHAccetpHeaderTypeRFC8484)
-	}
+	// "Accept" & "Content-Type" must set
+	req.Header.Set("Accept", configx.DOHAccetpHeaderTypeRFC8484)
 
-	if hs, found := doh.Headers["Host"]; found {
-		if len(hs) > 0 {
-			req.Host = hs[0]
-		}
+	if req.Method == http.MethodPost {
+		req.Header.Set("Content-Type", configx.DOHAccetpHeaderTypeRFC8484)
 	}
 
 	resp, err := doh.Client.Do(req)

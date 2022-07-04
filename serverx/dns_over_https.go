@@ -7,7 +7,9 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"gnamed/queryx"
+	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -194,7 +196,7 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 	var bs []byte
 	var err error
 	switch c.Request.Method {
-	case "GET":
+	case http.MethodGet:
 		hexStr, found := c.GetQuery("dns")
 		if !found {
 			logEvent.Err(errors.New("bad request, query_name dns not found"))
@@ -202,7 +204,12 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 			return
 		}
 		bs, err = hex.DecodeString(hexStr)
-	case "POST":
+	case http.MethodPost:
+		if c.GetHeader("Content-Type") == string(configx.DOHAccetpHeaderTypeRFC8484) {
+			logEvent.Int("status_code", http.StatusMethodNotAllowed)
+			c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
+			return
+		}
 		bs, err = c.GetRawData()
 	default:
 		logEvent.Int("status_code", http.StatusMethodNotAllowed)
@@ -245,7 +252,14 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 
 func serveDoHFunc(listen configx.Listen) {
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	if os.Getenv(envGinDisableLog) == "" {
+		r.Use(gin.Logger(), gin.Recovery())
+	} else {
+		r.Use(gin.Recovery())
+		gin.DefaultWriter = ioutil.Discard
+		//gin.DefaultErrorWriter = ioutil.Discard
+	}
+	//gin.SetMode(gin.ReleaseMode)
 
 	if listen.DohPath == "" {
 		r.GET("/dns-query", handleDoHRequest)

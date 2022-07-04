@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"gnamed/libnamed"
 	"io/ioutil"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 )
@@ -34,14 +36,14 @@ var (
 )
 
 type Config struct {
-	filename           string            `json:"-"` // current using configuration file name
-	timestamp          time.Time         `json:"-"` // configuration file parse timestamp
-	lock               *sync.Mutex       `json:"-"` // internal use, lazy init some values
-	singleflightGroups []*libnamed.Group `json:"-"` // max size 1<<16
-	Server             Server            `json:"server"`
-	Query              Query             `json:"query"`
-	Admin              Admin             `json:"admin"`
-	Files              Files             `json:"files"`
+	filename           string              `json:"-"` // current using configuration file name
+	timestamp          time.Time           `json:"-"` // configuration file parse timestamp
+	lock               sync.Mutex          `json:"-"` // internal use, lazy init some values
+	singleflightGroups [][]*libnamed.Group `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
+	Server             Server              `json:"server"`
+	Query              Query               `json:"query"`
+	Admin              Admin               `json:"admin"`
+	Files              Files               `json:"files"`
 }
 
 type Server struct {
@@ -76,28 +78,33 @@ type Listen struct {
 }
 
 type TlsConfig struct {
-	ServerName string `json:"serverName"`
-
-	CertFile string `json:"certFile"`
-	KeyFile  string `json:"keyFile"`
+	ServerName         string `json:"serverName"`
+	InsecureSkipVerify bool   `json:"insecure"`
+	CertFile           string `json:"certFile"`
+	KeyFile            string `json:"keyFile"`
 }
 
 // Server -> NameServer
 type NameServer struct {
-	Protocol string    `json:"protocol"`
-	Dns      DODServer `json:"dns,omitempty"`
-	DoT      DOTServer `json:"dot,omitempty"`
-	DoH      DOHServer `json:"doh,omitempty"`
+	Protocol string     `json:"protocol"`
+	Dns      *DODServer `json:"dns,omitempty"`
+	DoT      *DOTServer `json:"dot,omitempty"`
+	DoH      *DOHServer `json:"doh,omitempty"`
+	DoQ      *DOQServer `json:"doq,omitempty"`
 }
 
 type DODServer struct {
-	Server  string  `json:"server"`
-	Timeout Timeout `json:"timeout"`
-	DnsOpt  DnsOpt  `json:"dns_opt"`
+	Server  string `json:"server"`
+	Network string `json:"network"`
+
+	Timeout Timeout         `json:"timeout"`
+	DnsOpt  DnsOpt          `json:"dns_opt"`
+	Pool    *ConnectionPool `json:"pool"`
 
 	// use internal
-	ClientUDP *dns.Client `json:"-"`
-	ClientTCP *dns.Client `json:"-"`
+	ClientUDP         *dns.Client                 `json:"-"`
+	ClientTCP         *dns.Client                 `json:"-"`
+	ConnectionPoolTCP *libnamed.DnsConnectionPool `json:"-"`
 }
 
 type DOHMsgType string
@@ -127,8 +134,8 @@ type DOHServer struct {
 }
 
 type DOTServer struct {
-	Server string `json:"server"`
-	Sni    string `json:"sni"`
+	Server string          `json:"server"`
+	Pool   *ConnectionPool `json:"pool"`
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -138,7 +145,25 @@ type DOTServer struct {
 	DnsOpt    DnsOpt    `json:"dns_opt"`
 
 	// use internal
-	Client *dns.Client `json:"-"`
+	Client         *dns.Client                 `json:"-"`
+	ConnectionPool *libnamed.DnsConnectionPool `json:"-"`
+}
+
+// DNS-over-QUIC
+type DOQServer struct {
+	Server string `json:"server"`
+
+	// if "Server" not a ip address, use this nameservers to resolve domain
+	ExternalNameServers []string `json:"externalNameServers"`
+
+	TlsConfig TlsConfig `json:"tls_config"`
+	Timeout   Timeout   `json:"timeout"`
+	DnsOpt    DnsOpt    `json:"dns_opt"`
+
+	// use internal
+	TlsConf  *tls.Config  `json:"-"`
+	QuicConf *quic.Config `json:"-"`
+	Addrs    []string     `json:"-"` // TODO: IP Address Only (both ipv4 and ipv6), domain not allow
 }
 
 type Timeout struct {
@@ -150,6 +175,14 @@ type Timeout struct {
 	ReadDuration    time.Duration `json:"-"`
 	Write           string        `json:"write"`
 	WriteDuration   time.Duration `json:"-"`
+}
+
+type ConnectionPool struct {
+	IdleTimeout         string        `json:"idle"`
+	idleTimeoutDuration time.Duration `json:"-"`
+	WaitTimeout         string        `json:"waitTimeout"`
+	waitTimeoutDuration time.Duration `json:"-"`
+	Size                int           `json:"size"`
 }
 
 type DnsOpt struct {
@@ -174,12 +207,16 @@ type Host struct {
 
 // Server -> Cache
 type Cache struct {
-	MaxTTL              uint32 `json:"maxTTL"`
-	MinTTL              uint32 `json:"minTTL"`
-	Mode                string `json:"mode"`
-	UseSteal            bool   `json:"useSteal"`            // use steal cache, when element expired, return and trigger background query
-	BackgroundUpdate    bool   `json:"backGroundUpdate"`    // UseSteal always trigger background query
-	BeforeExpiredSecond int64  `json:"beforeExpiredSecond"` // if an element will be expired less than this seconds, enable background query
+	MaxTTL               uint32  `json:"maxTTL"`
+	MinTTL               uint32  `json:"minTTL"`
+	Mode                 string  `json:"mode"`
+	UseSteal             bool    `json:"useSteal"`             // use steal cache, when element expired, return and trigger background query
+	BackgroundUpdate     bool    `json:"backGroundUpdate"`     // true if BackgroundUpdate || UseSteal || BeforeExpiredSecond != 0 || BeforeExpiredPercent != 0
+	BeforeExpiredSecond  int64   `json:"beforeExpiredSecond"`  // time.Now().Unix() >= expired - BeforeExpiredSecond, enable background query
+	BeforeExpiredPercent float64 `json:"beforeExpiredPercent"` // time.Now().Unix() >= expired - ttl * BeforeExpiredPercent, enable background query
+
+	// internal use
+	backgroundQueryMap *sync.Map `json:"-"`
 }
 
 // Query
@@ -217,16 +254,16 @@ type Files struct {
 	EcsIpList string
 }
 
-func ParseConfig(fname string) (Config, error) {
+func ParseConfig(fname string) (*Config, error) {
 	return parseConfig(fname)
 }
-func parseConfig(fname string) (Config, error) {
-	var cfg Config
+func parseConfig(fname string) (*Config, error) {
+	cfg := new(Config)
 	fbs, err := ioutil.ReadFile(fname)
 	if err != nil {
 		return cfg, err
 	}
-	err = json.Unmarshal(fbs, &cfg)
+	err = json.Unmarshal(fbs, cfg)
 	if err != nil {
 		return cfg, err
 	}
@@ -235,7 +272,9 @@ func parseConfig(fname string) (Config, error) {
 	cfg.timestamp = time.Now()
 
 	for i := 0; i < len(cfg.Server.Listen); i++ {
-		cfg.Server.Listen[i].parse()
+		if err = cfg.Server.Listen[i].parse(); err != nil {
+			return cfg, err
+		}
 	}
 
 	if err = cfg.Server.parse(); err != nil {
@@ -243,6 +282,10 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	// view -> FQDN
+	// default view "." must exist
+	if _, found := cfg.Server.View["."]; !found {
+		return cfg, fmt.Errorf("default view \".\" not exist")
+	}
 	for vk, vv := range cfg.Server.View {
 		if vv.Cname != "" {
 			vv.Cname = dns.Fqdn(vv.Cname)
@@ -263,8 +306,9 @@ func parseConfig(fname string) (Config, error) {
 	}
 
 	if cfg.Server.Main.Singleflight {
-		cfg.singleflightGroups = make([]*libnamed.Group, 1<<16)
-		cfg.lock = new(sync.Mutex) // initialize global lock
+		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
+		// [(1<<16) - 1][(1<<16) - 1]*libnamed.Group
+		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16)
 	}
 
 	// verify and defaulting cache configuration options
@@ -320,14 +364,39 @@ func (c *Cache) parse() error {
 	}
 
 	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
-		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, will cause cache update every time\n", c.BeforeExpiredSecond, c.MaxTTL)
+		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, do background query every time when cache hit\n", c.BeforeExpiredSecond, c.MaxTTL)
 	}
 
 	if c.BeforeExpiredSecond < 0 {
 		return fmt.Errorf("invalid beforeExpiredSecond %d < 0", c.BeforeExpiredSecond)
 	}
 
+	if c.BeforeExpiredPercent == 1 {
+		fmt.Fprintf(os.Stderr, "[+] beforeExpiredPercent %f, do background query every time when cache hit\n", c.BeforeExpiredPercent)
+	}
+
+	if c.BeforeExpiredPercent > 1 || c.BeforeExpiredPercent < 0 {
+		return fmt.Errorf("invalid beforeExpiredSecond %f, not between [0, 1.0]", c.BeforeExpiredPercent)
+	}
+
+	c.BackgroundUpdate = c.BackgroundUpdate || c.UseSteal || (c.BeforeExpiredSecond > 0) || (c.BeforeExpiredPercent > 0 || c.BeforeExpiredPercent <= 1)
+
+	if c.BackgroundUpdate {
+		c.backgroundQueryMap = new(sync.Map)
+	}
+
 	return nil
+}
+
+// try to get lock about key
+// return false, if key already locked, else return true and lock the key
+func (c *Cache) BackgroundQueryTryLock(key string) bool {
+	_, loaded := c.backgroundQueryMap.LoadOrStore(key, true)
+	return !loaded
+}
+
+func (c *Cache) BackgroundQueryUnlock(key string) {
+	c.backgroundQueryMap.Delete(key)
 }
 
 func (l *Listen) parse() error {
@@ -344,43 +413,34 @@ func (l *Listen) parse() error {
 	if _ip := net.ParseIP(ip); _ip == nil {
 		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
 	}
-	switch l.Protocol {
-	case ProtocolTypeDNS:
-		switch l.Network {
-		case NetworkTypeTcp, NetworkTypeUdp:
-			//
-		default:
-			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-		}
-	case ProtocolTypeDoH, ProtocolTypeDoT:
-		switch l.Network {
-		case NetworkTypeTcp:
-			//
-		default:
-			return fmt.Errorf("listen addr '%s' protocol '%s' not compatible with '%s'", l.Addr, l.Protocol, l.Network)
-		}
-	default:
-		return fmt.Errorf("listen addr '%s' protocol '%s' not support", l.Addr, l.Protocol)
-	}
-	l.Timeout.parse()
 
-	return nil
+	return l.Timeout.parse()
 }
 
-func (cfg *Config) GetSingleFlightGroup(qtype uint16) *libnamed.Group {
-	if cfg.singleflightGroups[qtype] == nil {
-		// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
-		// make sure value only inittialize once
-		// make sure waiting concurrency caller get valid and correct value
+func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.Group {
+	// lazy initialize
+	// 1. empty singleflightGroups memory usage: 65535 * sizeof(nil)
+	if len(cfg.singleflightGroups[qclass]) == 0 {
 		cfg.lock.Lock()
-		if cfg.singleflightGroups[qtype] == nil {
-			// double check
-			cfg.singleflightGroups[qtype] = new(libnamed.Group)
+		if len(cfg.singleflightGroups[qclass]) == 0 {
+			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16)
+			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
+	} else {
+		if cfg.singleflightGroups[qclass][qtype] == nil {
+			// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
+			// make sure value only inittialize once
+			// make sure waiting concurrency caller get valid and correct value
+			cfg.lock.Lock()
+			if cfg.singleflightGroups[qclass][qtype] == nil {
+				// double check
+				cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
+			}
+			cfg.lock.Unlock()
+		}
 	}
-
-	return cfg.singleflightGroups[qtype]
+	return cfg.singleflightGroups[qclass][qtype]
 }
 
 func (mf *Main) parse() error {
@@ -414,6 +474,38 @@ func (t *Timeout) parse() error {
 	return nil
 }
 
+func (cp *ConnectionPool) parse() error {
+	if cp == nil {
+		return nil
+	}
+
+	if cp.Size == 0 {
+		cp.Size = DefaultPoolSize
+	}
+
+	if cp.IdleTimeout == "" {
+		cp.idleTimeoutDuration = DefaultPoolIdleTimeoutDuration
+	} else {
+		if d, err := time.ParseDuration(cp.IdleTimeout); err != nil {
+			return err
+		} else {
+			cp.idleTimeoutDuration = d
+		}
+	}
+
+	if cp.WaitTimeout == "" {
+		cp.waitTimeoutDuration = DefaultPoolWaitTimeoutDuration
+	} else {
+		if d, err := time.ParseDuration(cp.WaitTimeout); err != nil {
+			return err
+		} else {
+			cp.waitTimeoutDuration = d
+		}
+	}
+
+	return nil
+}
+
 func (srv *Server) parse() error {
 	res := true
 
@@ -432,6 +524,8 @@ func (srv *Server) parse() error {
 				err = ns.DoH.parse()
 			case ProtocolTypeDoT:
 				err = ns.DoT.parse()
+			case ProtocolTypeDoQ:
+				err = ns.DoQ.parse()
 			default:
 				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", vi.NameServerTag, ns.Protocol)
 				res = false
@@ -469,16 +563,18 @@ func (dod *DODServer) parse() error {
 
 	dod.Timeout.parse()
 
-	dod.ClientUDP = &dns.Client{
-		// Default buffer size to use to read incoming UDP message
-		// default 512 B
-		// must increase if edns-client-sub enable
-		UDPSize:      1024,
-		Net:          "udp",
-		DialTimeout:  dod.Timeout.ConnectDuration,
-		ReadTimeout:  dod.Timeout.ReadDuration,
-		WriteTimeout: dod.Timeout.WriteDuration,
-		//SingleInflight: true,
+	if dod.Network != "tcp" {
+		dod.ClientUDP = &dns.Client{
+			// Default buffer size to use to read incoming UDP message
+			// default 512 B
+			// must increase if edns-client-sub enable
+			UDPSize:      1024,
+			Net:          "udp",
+			DialTimeout:  dod.Timeout.ConnectDuration,
+			ReadTimeout:  dod.Timeout.ReadDuration,
+			WriteTimeout: dod.Timeout.WriteDuration,
+			//SingleInflight: true,
+		}
 	}
 
 	dod.ClientTCP = &dns.Client{
@@ -493,6 +589,15 @@ func (dod *DODServer) parse() error {
 		//SingleInflight: true,
 	}
 
+	if dod.Network == "tcp" {
+		if err := dod.Pool.parse(); err != nil {
+			return err
+		}
+		// only tcp enable connection pool
+		dod.ConnectionPoolTCP = libnamed.NewDnsConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+			return dod.ClientTCP.Dial(dod.Server)
+		})
+	}
 	return nil
 }
 
@@ -557,7 +662,8 @@ func (doh *DOHServer) parse() error {
 	if doh.TlsConfig.ServerName != "" {
 		tr := &http.Transport{
 			TLSClientConfig: &tls.Config{
-				ServerName: doh.TlsConfig.ServerName,
+				ServerName:         doh.TlsConfig.ServerName,
+				InsecureSkipVerify: doh.TlsConfig.InsecureSkipVerify,
 			},
 			ForceAttemptHTTP2: true,
 			Proxy:             http.ProxyFromEnvironment,
@@ -578,38 +684,15 @@ func (doh *DOHServer) parse() error {
 
 // FIXME: dot.Server was a config file, should not be change.
 func (dot *DOTServer) parse() error {
-	errInvalidServer := fmt.Errorf("invalid dns-over-tls server address '%s'", dot.Server)
-	host, portStr, err := net.SplitHostPort(dot.Server)
+	server, host, err := parseServer(dot.Server, dot.ExternalNameServers, DefaultPortDoT)
 	if err != nil {
-		host = dot.Server
-		portStr = strconv.Itoa(DefaultPortDoT)
-		dot.Server = net.JoinHostPort(dot.Server, portStr)
-	} else {
-		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
-			return errInvalidServer
-		}
+		return err
 	}
+	dot.Server = server
 
-	if net.ParseIP(host) == nil {
-		dot.Server = ""
-		// domain, lookupIP
-		host = dns.Fqdn(host)
-		if libnamed.ValidateDomain(host) {
-			host = lookupIP(host, dot.ExternalNameServers)
-			if len(host) != 0 {
-				dot.Server = net.JoinHostPort(host, portStr)
-			} else {
-				return fmt.Errorf("server '%s' no valid ip address found", dot.Server)
-			}
-		}
-	}
-
-	if dot.Server == "" {
-		return errInvalidServer
-	}
-
-	if dot.Sni == "" {
-		dot.Sni = strings.ToLower(strings.TrimRight(host, "."))
+	sni := dot.TlsConfig.ServerName
+	if sni == "" {
+		sni = strings.ToLower(strings.TrimRight(host, "."))
 	}
 
 	dot.Timeout.parse()
@@ -617,7 +700,8 @@ func (dot *DOTServer) parse() error {
 	dot.Client = &dns.Client{
 		Net: "tcp-tls",
 		TLSConfig: &tls.Config{
-			ServerName: dot.TlsConfig.ServerName,
+			ServerName:         sni,
+			InsecureSkipVerify: dot.TlsConfig.InsecureSkipVerify,
 		},
 
 		DialTimeout:  dot.Timeout.ConnectDuration,
@@ -626,7 +710,66 @@ func (dot *DOTServer) parse() error {
 		//SingleInflight: true,
 	}
 
+	if dot.Pool != nil {
+		if err := dot.Pool.parse(); err != nil {
+			return err
+		}
+
+		dot.ConnectionPool = libnamed.NewDnsConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+			return dot.Client.Dial(dot.Server)
+		})
+	}
 	return nil
+}
+
+// FIXME: dot.Server was a config file, should not be change.
+func (doq *DOQServer) parse() error {
+	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, DefaultPortDoQ)
+	if err != nil {
+		return err
+	}
+	doq.Server = server
+
+	sni := doq.TlsConfig.ServerName
+	if sni == "" {
+		sni = strings.ToLower(strings.TrimRight(host, "."))
+	}
+
+	doq.Timeout.parse()
+
+	// internal
+	doq.TlsConf = &tls.Config{
+		ServerName:         sni,
+		NextProtos:         []string{"doq-i02", "doq-i00", "dq", "doq"},
+		InsecureSkipVerify: doq.TlsConfig.InsecureSkipVerify,
+	}
+	doq.QuicConf = &quic.Config{
+		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
+	}
+
+	return nil
+}
+
+func parseServer(server string, nameservers []string, defaultPort int) (string, string, error) {
+
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		host = server
+		port = strconv.Itoa(defaultPort)
+		server = net.JoinHostPort(server, port)
+	}
+
+	if net.ParseIP(host) == nil {
+		if libnamed.ValidateDomain(host) {
+			addr := lookupIP(dns.Fqdn(host), nameservers)
+			if len(addr) == 0 {
+				return server, host, fmt.Errorf("server '%s' no valid ip address found", server)
+			}
+			server = net.JoinHostPort(addr, port)
+		}
+	}
+
+	return server, host, err
 }
 
 func lookupIP(name string, nameservers []string) string {
@@ -636,7 +779,7 @@ func lookupIP(name string, nameservers []string) string {
 	}
 	for _, ns := range nss {
 		r := new(dns.Msg)
-		r.SetQuestion(name, dns.TypeA)
+		r.SetQuestion(dns.Fqdn(name), dns.TypeA)
 		client := dns.Client{
 			Timeout: 5 * time.Second,
 		}

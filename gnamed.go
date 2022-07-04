@@ -58,7 +58,7 @@ func main() {
 	cachex.InitCache(cfg.Server.Cache.Mode)
 
 	var wg sync.WaitGroup
-	serverx.Serve(&cfg, &wg)
+	serverx.Serve(cfg, &wg)
 	wg.Wait()
 
 	fakeTimer.Stop()
