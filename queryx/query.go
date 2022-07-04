@@ -110,17 +110,29 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	// 3. cache search
 	if !byPassCache {
 		cacheCfg := config.Server.Cache
-		if rmsg, expiredUTC, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && expiredUTC > 0) {
-			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && expiredUTC-libnamed.GetFakeTimerUnixSecond() <= cacheCfg.BeforeExpiredSecond {
-				logEvent.Bool("background_update", true)
-				// do background query
-				go func(nr *dns.Msg) {
-					_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype])
-					// bypass singflight & cache
-					_, nerr := query(nr, config, _logEvent, true)
-					_logEvent.Err(nerr).Msg("")
-				}(r.Copy())
+		if rmsg, expiredUTC, cacheTTL, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && rmsg != nil && expiredUTC > 0) {
+			nowUTC := libnamed.GetFakeTimerUnixSecond()
+			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && ((cacheCfg.BeforeExpiredSecond > 0 && expiredUTC-cacheCfg.BeforeExpiredSecond <= nowUTC) || (cacheCfg.BeforeExpiredPercent > 0 && expiredUTC-int64((float64(cacheTTL)*cacheCfg.BeforeExpiredPercent)) <= nowUTC)) {
+
+				lockKey := qname + "_" + dns.ClassToString[r.Question[0].Qclass] + "_" + qtype
+				if cacheCfg.BackgroundQueryTryLock(lockKey) {
+					// ensure only one outgoing same query (qname, qclass, qtype)
+					logEvent.Bool("background_update", true)
+					// do background query
+					go func(nr *dns.Msg, lockKey string) {
+						defer cacheCfg.BackgroundQueryUnlock(lockKey)
+						_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype]).Str("qclass", dns.ClassToString[nr.Question[0].Qclass])
+						// bypass singleflight & cache
+						// if not bypass singleflight, depend on schedule, background query might reply from cache itself:
+						// background query execute before reply from cache
+						// if curr query include all same querys blocking by singleflight have completed and background query hasn't completed,
+						// might be more than one outgoing same query
+						_, nerr := query(nr, config, _logEvent, true)
+						_logEvent.Err(nerr).Msg("")
+					}(r.Copy(), lockKey)
+				}
 			}
+
 			logEvent.Str("query_type", "").Str("rcode", dns.RcodeToString[rmsg.Rcode])
 			if found {
 				logEvent.Str("cache", "hit")
@@ -267,7 +279,7 @@ func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
 	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, cacheTTL)
 }
 
-func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool) {
+func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, uint32, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
 	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {
@@ -277,16 +289,16 @@ func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, bool)
 			// 2. delete cache ?
 			// 3. ignore
 			libnamed.Logger.Error().Str("op_type", "unpack_cache_msg").Str("qname", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
-			return nil, expiredUTC, false
+			return nil, 0, 0, false
 		}
 
 		cacheTTL := getMsgTTL(resp, cacheCfg)
 		replyUpdateTTL(resp, expiredUTC, cacheTTL)
 
-		return resp, expiredUTC, found
+		return resp, expiredUTC, cacheTTL, found
 	}
 
-	return nil, 0, false
+	return nil, 0, 0, false
 }
 
 func replyUpdateTTL(r *dns.Msg, expiredUTC int64, ttl uint32) {

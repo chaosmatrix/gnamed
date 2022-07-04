@@ -207,12 +207,16 @@ type Host struct {
 
 // Server -> Cache
 type Cache struct {
-	MaxTTL              uint32 `json:"maxTTL"`
-	MinTTL              uint32 `json:"minTTL"`
-	Mode                string `json:"mode"`
-	UseSteal            bool   `json:"useSteal"`            // use steal cache, when element expired, return and trigger background query
-	BackgroundUpdate    bool   `json:"backGroundUpdate"`    // UseSteal always trigger background query
-	BeforeExpiredSecond int64  `json:"beforeExpiredSecond"` // if an element will be expired less than this seconds, enable background query
+	MaxTTL               uint32  `json:"maxTTL"`
+	MinTTL               uint32  `json:"minTTL"`
+	Mode                 string  `json:"mode"`
+	UseSteal             bool    `json:"useSteal"`             // use steal cache, when element expired, return and trigger background query
+	BackgroundUpdate     bool    `json:"backGroundUpdate"`     // true if BackgroundUpdate || UseSteal || BeforeExpiredSecond != 0 || BeforeExpiredPercent != 0
+	BeforeExpiredSecond  int64   `json:"beforeExpiredSecond"`  // time.Now().Unix() >= expired - BeforeExpiredSecond, enable background query
+	BeforeExpiredPercent float64 `json:"beforeExpiredPercent"` // time.Now().Unix() >= expired - ttl * BeforeExpiredPercent, enable background query
+
+	// internal use
+	backgroundQueryMap *sync.Map `json:"-"`
 }
 
 // Query
@@ -360,14 +364,39 @@ func (c *Cache) parse() error {
 	}
 
 	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
-		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, will cause cache update every time\n", c.BeforeExpiredSecond, c.MaxTTL)
+		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, do background query every time when cache hit\n", c.BeforeExpiredSecond, c.MaxTTL)
 	}
 
 	if c.BeforeExpiredSecond < 0 {
 		return fmt.Errorf("invalid beforeExpiredSecond %d < 0", c.BeforeExpiredSecond)
 	}
 
+	if c.BeforeExpiredPercent == 1 {
+		fmt.Fprintf(os.Stderr, "[+] beforeExpiredPercent %f, do background query every time when cache hit\n", c.BeforeExpiredPercent)
+	}
+
+	if c.BeforeExpiredPercent > 1 || c.BeforeExpiredPercent < 0 {
+		return fmt.Errorf("invalid beforeExpiredSecond %f, not between [0, 1.0]", c.BeforeExpiredPercent)
+	}
+
+	c.BackgroundUpdate = c.BackgroundUpdate || c.UseSteal || (c.BeforeExpiredSecond > 0) || (c.BeforeExpiredPercent > 0 || c.BeforeExpiredPercent <= 1)
+
+	if c.BackgroundUpdate {
+		c.backgroundQueryMap = new(sync.Map)
+	}
+
 	return nil
+}
+
+// try to get lock about key
+// return false, if key already locked, else return true and lock the key
+func (c *Cache) BackgroundQueryTryLock(key string) bool {
+	_, loaded := c.backgroundQueryMap.LoadOrStore(key, true)
+	return !loaded
+}
+
+func (c *Cache) BackgroundQueryUnlock(key string) {
+	c.backgroundQueryMap.Delete(key)
 }
 
 func (l *Listen) parse() error {
