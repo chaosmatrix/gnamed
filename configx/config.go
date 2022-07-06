@@ -307,8 +307,9 @@ func parseConfig(fname string) (*Config, error) {
 
 	if cfg.Server.Main.Singleflight {
 		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
-		// [(1<<16) - 1][(1<<16) - 1]*libnamed.Group
-		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16)
+		// [1<<16][1<<16]*libnamed.Group
+		// empty singleflightGroups memory usage: 65536 * sizeof(uintptr) = 65536 * 8 byte = 0.5MB
+		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16+1)
 	}
 
 	// verify and defaulting cache configuration options
@@ -419,11 +420,10 @@ func (l *Listen) parse() error {
 
 func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.Group {
 	// lazy initialize
-	// 1. empty singleflightGroups memory usage: 65535 * sizeof(nil)
 	if len(cfg.singleflightGroups[qclass]) == 0 {
 		cfg.lock.Lock()
 		if len(cfg.singleflightGroups[qclass]) == 0 {
-			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16)
+			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16+1)
 			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
