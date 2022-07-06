@@ -17,7 +17,7 @@ func TestFindNameServer(t *testing.T) {
 	}
 
 	sort.Slice(zones, func(i, j int) bool {
-		return len(zones[i]) > len(zones[i])
+		return len(zones[i]) > len(zones[j])
 	})
 
 	// invalid domain prefix do search

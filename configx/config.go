@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 )
@@ -90,7 +89,6 @@ type NameServer struct {
 	Dns      *DODServer `json:"dns,omitempty"`
 	DoT      *DOTServer `json:"dot,omitempty"`
 	DoH      *DOHServer `json:"doh,omitempty"`
-	DoQ      *DOQServer `json:"doq,omitempty"`
 }
 
 type DODServer struct {
@@ -147,23 +145,6 @@ type DOTServer struct {
 	// use internal
 	Client         *dns.Client                 `json:"-"`
 	ConnectionPool *libnamed.DnsConnectionPool `json:"-"`
-}
-
-// DNS-over-QUIC
-type DOQServer struct {
-	Server string `json:"server"`
-
-	// if "Server" not a ip address, use this nameservers to resolve domain
-	ExternalNameServers []string `json:"externalNameServers"`
-
-	TlsConfig TlsConfig `json:"tls_config"`
-	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    DnsOpt    `json:"dns_opt"`
-
-	// use internal
-	TlsConf  *tls.Config  `json:"-"`
-	QuicConf *quic.Config `json:"-"`
-	Addrs    []string     `json:"-"` // TODO: IP Address Only (both ipv4 and ipv6), domain not allow
 }
 
 type Timeout struct {
@@ -307,8 +288,9 @@ func parseConfig(fname string) (*Config, error) {
 
 	if cfg.Server.Main.Singleflight {
 		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
-		// [(1<<16) - 1][(1<<16) - 1]*libnamed.Group
-		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16)
+		// [1<<16][1<<16]*libnamed.Group
+		// empty singleflightGroups memory usage: 65536 * sizeof(uintptr) = 65536 * 8 byte = 0.5MB
+		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16+1)
 	}
 
 	// verify and defaulting cache configuration options
@@ -419,11 +401,10 @@ func (l *Listen) parse() error {
 
 func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.Group {
 	// lazy initialize
-	// 1. empty singleflightGroups memory usage: 65535 * sizeof(nil)
 	if len(cfg.singleflightGroups[qclass]) == 0 {
 		cfg.lock.Lock()
 		if len(cfg.singleflightGroups[qclass]) == 0 {
-			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16)
+			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16+1)
 			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
@@ -524,8 +505,6 @@ func (srv *Server) parse() error {
 				err = ns.DoH.parse()
 			case ProtocolTypeDoT:
 				err = ns.DoT.parse()
-			case ProtocolTypeDoQ:
-				err = ns.DoQ.parse()
 			default:
 				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", vi.NameServerTag, ns.Protocol)
 				res = false
@@ -719,34 +698,6 @@ func (dot *DOTServer) parse() error {
 			return dot.Client.Dial(dot.Server)
 		})
 	}
-	return nil
-}
-
-// FIXME: dot.Server was a config file, should not be change.
-func (doq *DOQServer) parse() error {
-	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, DefaultPortDoQ)
-	if err != nil {
-		return err
-	}
-	doq.Server = server
-
-	sni := doq.TlsConfig.ServerName
-	if sni == "" {
-		sni = strings.ToLower(strings.TrimRight(host, "."))
-	}
-
-	doq.Timeout.parse()
-
-	// internal
-	doq.TlsConf = &tls.Config{
-		ServerName:         sni,
-		NextProtos:         []string{"doq-i02", "doq-i00", "dq", "doq"},
-		InsecureSkipVerify: doq.TlsConfig.InsecureSkipVerify,
-	}
-	doq.QuicConf = &quic.Config{
-		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
-	}
-
 	return nil
 }
 

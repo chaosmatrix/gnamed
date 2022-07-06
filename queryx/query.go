@@ -185,9 +185,6 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	case configx.ProtocolTypeDoT:
 		logEvent.Str("query_type", "query_dot")
 		rmsg, err = queryDoT(r, nameserver.DoT)
-	case configx.ProtocolTypeDoQ:
-		logEvent.Str("query_type", "query_doq")
-		rmsg, err = queryDoQ(r, nameserver.DoQ)
 	default:
 		logEvent.Str("query_type", "query_dns")
 		rmsg, err = queryDoD(r, nameserver.Dns)

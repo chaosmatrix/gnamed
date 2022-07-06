@@ -52,13 +52,14 @@ $ gnamed
 ### TODO-List
 * [x] server: dns protocol support
 * [x] server: dns-over-https protocol support
-* [ ] server: dns-over-tls protocol support
+* [x] server: dns-over-tls protocol support
 * [x] server: ensure singleflight incoming query
 * [x] query: dns protocol support
 * [x] query: dns-over-https protocol support
 * [x] query: dns-over-tls protocol support
 * [ ] query: flexible view match rules, for example 'contains'
 * [x] cache: delete expired cache actively
+* [ ] cache: dns-over-https cache ttl should be calculated base on both http cache header and dns record ttl
 * [x] reply: update ttl when response from cache
 * [x] api: cache operations: delete/flush
 * [ ] api: dns query statistics: NXDOMAIN(security audit), Qtype, not NOERROR
@@ -68,7 +69,7 @@ $ gnamed
 * [ ] optimization: blacklist/whitelist `contains` rule match algorithm, Aho-Corasick or flashtext
 * [x] optimization: singleflight outgoing query (dns-over-https)
 * [ ] optimization: select lowest rtt record (cdn domain)
-* [ ] optimization: log format and fields
+* [x] optimization: log format and fields
 * [ ] optimization: algorithm to get dns response cache ttl
 
 ## References
