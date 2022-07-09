@@ -2,6 +2,8 @@ package libnamed
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,10 +27,20 @@ func TestRandomUpperDomain(t *testing.T) {
 		"123.456.com.": true, "123.com.": true, "123.example.com.": true,
 	}
 
-	for i := 1; i < 10; i++ {
+	diff := 0
+	times := 10
+	for i := 0; i < times; i++ {
 		for k := range testCase {
-			fmt.Printf("%s %s\n", k, RandomUpperDomain(k))
+			v := RandomUpperDomain(k)
+			if v != k && strings.EqualFold(v, k) {
+				diff++
+			}
 		}
+	}
+	if diff == 0 {
+		t.Errorf("[+] after %d times with %d domains RandomUpper ops, all domain equal", times, len(testCase))
+	} else {
+		fmt.Fprintf(os.Stderr, "[+] RandomUpperDomain change ratio: %f\n", float64(diff)/float64(times*len(testCase)))
 	}
 }
 

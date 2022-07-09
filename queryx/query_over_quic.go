@@ -1,3 +1,5 @@
+//go:build !noquic
+
 package queryx
 
 import (

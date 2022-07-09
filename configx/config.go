@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 )
@@ -156,24 +155,6 @@ type DOTServer struct {
 	ConnectionPool *libnamed.ConnectionPool `json:"-"`
 }
 
-// DNS-over-QUIC
-type DOQServer struct {
-	Server string          `json:"server"`
-	Draft  bool            `json:"draft"` // send message content to server in draft format, rather than rfc9250
-	Pool   *ConnectionPool `json:"pool"`
-
-	// if "Server" not a ip address, use this nameservers to resolve domain
-	ExternalNameServers []string `json:"externalNameServers"`
-
-	TlsConfig TlsConfig `json:"tls_config"`
-	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    *DnsOpt   `json:"dns_opt"`
-
-	// use internal
-	TlsConf  *tls.Config  `json:"-"`
-	QuicConf *quic.Config `json:"-"`
-}
-
 type Timeout struct {
 	Idle            string        `json:"idle"`
 	IdleDuration    time.Duration `json:"-"`
@@ -208,9 +189,10 @@ type View struct {
 
 // Server -> Hosts
 type Host struct {
-	Name   string `json:"name"`
-	Record string `json:"record"`
-	Qtype  string `json:"qtype"`
+	Name     string `json:"name"`
+	Record   string `json:"record"`
+	Qtype    string `json:"qtype"`
+	Wildcard bool   `json:"wildcard"`
 }
 
 // Server -> Cache
@@ -733,34 +715,6 @@ func (dot *DOTServer) parse() error {
 			return dot.Client.Dial(dot.Server)
 		})
 	}
-	return nil
-}
-
-// FIXME: dot.Server was a config file, should not be change.
-func (doq *DOQServer) parse() error {
-	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, DefaultPortDoQ)
-	if err != nil {
-		return err
-	}
-	doq.Server = server
-
-	sni := doq.TlsConfig.ServerName
-	if sni == "" {
-		sni = strings.ToLower(strings.TrimRight(host, "."))
-	}
-
-	doq.Timeout.parse()
-
-	// internal
-	doq.TlsConf = &tls.Config{
-		ServerName:         sni,
-		NextProtos:         []string{"doq-i02", "doq-i00", "dq", "doq"},
-		InsecureSkipVerify: doq.TlsConfig.InsecureSkipVerify,
-	}
-	doq.QuicConf = &quic.Config{
-		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
-	}
-
 	return nil
 }
 

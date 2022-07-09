@@ -15,7 +15,14 @@
 
 ## Install
 ```
+# default all features
 go build
+
+# disable dns-over-quic
+go build -tags="noquic"
+
+# reduce binary size
+go build -ldflags '-s -w'
 ```
 
 ## Usage
