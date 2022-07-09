@@ -4,17 +4,15 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 /*
  * Simple ConnectionPool - FIFO with global lock
  */
 
-type DnsConnectionPool struct {
+type ConnectionPool struct {
 	size        int
-	newConn     func() (*dns.Conn, error)
+	newConn     func() (interface{}, error)
 	lock        sync.Mutex
 	idleTimeout time.Duration
 	waitTimeout time.Duration
@@ -22,15 +20,15 @@ type DnsConnectionPool struct {
 }
 
 type Connection struct {
-	conn      *dns.Conn
+	conn      interface{}
 	expiredAt int64
 }
 
 var errTimeout error
 
-func NewDnsConnectionPool(size int, idleTimeout time.Duration, waitTimeout time.Duration, f func() (*dns.Conn, error)) *DnsConnectionPool {
+func NewConnectionPool(size int, idleTimeout time.Duration, waitTimeout time.Duration, f func() (interface{}, error)) *ConnectionPool {
 	errTimeout = fmt.Errorf("wait avaliable connection in connection pool, timeout after %s", waitTimeout)
-	return &DnsConnectionPool{
+	return &ConnectionPool{
 		size:        size,
 		newConn:     f,
 		idleTimeout: idleTimeout,
@@ -42,9 +40,8 @@ func NewDnsConnectionPool(size int, idleTimeout time.Duration, waitTimeout time.
 // FIFO
 // connection, latency, cached, error
 // Warning: unable to ensure conn is valid (didn't close by other side), caller should create new conn if conn invalid
-func (cp *DnsConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
+func (cp *ConnectionPool) Get() (interface{}, time.Duration, bool, error) {
 	cp.lock.Lock()
-	defer cp.lock.Unlock()
 	start := time.Now()
 	nowUnix := start.Unix()
 
@@ -52,6 +49,7 @@ func (cp *DnsConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
 	for i := 0; i < freeCnt; i++ {
 		conn := <-cp.queue
 		if conn.expiredAt > nowUnix {
+			cp.lock.Unlock()
 			// valid connection
 			// TODO: golang hasn't valid way to test connection has been closed by other side
 			// read 0-byte from conn always return nil https://github.com/golang/go/issues/10940#issuecomment-245773886
@@ -61,6 +59,7 @@ func (cp *DnsConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
 
 	// create new connection or wait
 	if freeCnt < cp.size {
+		cp.lock.Unlock()
 		// create new connection
 		c, err := cp.newConn()
 		if err != nil {
@@ -68,6 +67,7 @@ func (cp *DnsConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
 		}
 		return c, time.Since(start), false, nil
 	} else {
+		cp.lock.Unlock()
 		// wait
 		select {
 		case conn := <-cp.queue:
@@ -79,7 +79,7 @@ func (cp *DnsConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
 	}
 }
 
-func (cp *DnsConnectionPool) Put(conn *dns.Conn) {
+func (cp *ConnectionPool) Put(conn interface{}) {
 	cp.lock.Lock()
 	defer cp.lock.Unlock()
 	cp.queue <- &Connection{
