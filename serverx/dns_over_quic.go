@@ -1,3 +1,5 @@
+//go:build !noquic
+
 package serverx
 
 import (
