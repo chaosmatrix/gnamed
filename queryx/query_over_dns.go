@@ -22,7 +22,8 @@ func queryDoD(r *dns.Msg, dod *configx.DODServer) (*dns.Msg, error) {
 		logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", client.Net)
 
 		if dod.ConnectionPoolTCP != nil {
-			conn, _rtt, cached, _err := dod.ConnectionPoolTCP.Get()
+			vconn, _rtt, cached, _err := dod.ConnectionPoolTCP.Get()
+			conn, _ := vconn.(*dns.Conn)
 			logEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
 			if _err == nil {
 				logEvent.Str("connection_pointer", fmt.Sprintf("%p", conn))

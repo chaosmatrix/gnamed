@@ -18,7 +18,8 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
 	var rtt time.Duration
 
 	if dot.ConnectionPool != nil {
-		conn, _rtt, cached, _err := dot.ConnectionPool.Get()
+		vconn, _rtt, cached, _err := dot.ConnectionPool.Get()
+		conn, _ := vconn.(*dns.Conn)
 		logEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
 		if _err == nil {
 			logEvent.Str("connection_pointer", fmt.Sprintf("%p", conn))

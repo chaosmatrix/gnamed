@@ -69,12 +69,19 @@ type Main struct {
 
 // Server -> Listen
 type Listen struct {
-	Addr      string    `json:"addr"`
-	Network   string    `json:"network"`
-	Protocol  string    `json:"protocol"`
-	DohPath   string    `json:"doh_path"` // doh path, default "/dns-query"
-	TlsConfig TlsConfig `json:"tls_config"`
-	Timeout   Timeout   `json:"timeout"`
+	Addr          string    `json:"addr"`
+	Network       string    `json:"network"`
+	Protocol      string    `json:"protocol"`
+	DohPath       string    `json:"doh_path"` // doh path, default "/dns-query"
+	TlsConfig     TlsConfig `json:"tls_config"`
+	Timeout       Timeout   `json:"timeout"`
+	QuerysPerConn int       `json:"querysPerConn"`
+}
+
+// TODO
+type SocketAttr struct {
+	KeepAliveNum      int
+	KeepAliveInterval int
 }
 
 type TlsConfig struct {
@@ -98,13 +105,13 @@ type DODServer struct {
 	Network string `json:"network"`
 
 	Timeout Timeout         `json:"timeout"`
-	DnsOpt  DnsOpt          `json:"dns_opt"`
+	DnsOpt  *DnsOpt         `json:"dns_opt"`
 	Pool    *ConnectionPool `json:"pool"`
 
 	// use internal
-	ClientUDP         *dns.Client                 `json:"-"`
-	ClientTCP         *dns.Client                 `json:"-"`
-	ConnectionPoolTCP *libnamed.DnsConnectionPool `json:"-"`
+	ClientUDP         *dns.Client              `json:"-"`
+	ClientTCP         *dns.Client              `json:"-"`
+	ConnectionPoolTCP *libnamed.ConnectionPool `json:"-"`
 }
 
 type DOHMsgType string
@@ -127,7 +134,7 @@ type DOHServer struct {
 
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    DnsOpt    `json:"dns_opt"`
+	DnsOpt    *DnsOpt   `json:"dns_opt"`
 
 	// use internal
 	Client *http.Client `json:"-"`
@@ -142,28 +149,29 @@ type DOTServer struct {
 
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    DnsOpt    `json:"dns_opt"`
+	DnsOpt    *DnsOpt   `json:"dns_opt"`
 
 	// use internal
-	Client         *dns.Client                 `json:"-"`
-	ConnectionPool *libnamed.DnsConnectionPool `json:"-"`
+	Client         *dns.Client              `json:"-"`
+	ConnectionPool *libnamed.ConnectionPool `json:"-"`
 }
 
 // DNS-over-QUIC
 type DOQServer struct {
-	Server string `json:"server"`
+	Server string          `json:"server"`
+	Draft  bool            `json:"draft"` // send message content to server in draft format, rather than rfc9250
+	Pool   *ConnectionPool `json:"pool"`
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
 
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    DnsOpt    `json:"dns_opt"`
+	DnsOpt    *DnsOpt   `json:"dns_opt"`
 
 	// use internal
 	TlsConf  *tls.Config  `json:"-"`
 	QuicConf *quic.Config `json:"-"`
-	Addrs    []string     `json:"-"` // TODO: IP Address Only (both ipv4 and ipv6), domain not allow
 }
 
 type Timeout struct {
@@ -415,6 +423,12 @@ func (l *Listen) parse() error {
 		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
 	}
 
+	if l.QuerysPerConn < 0 {
+		return fmt.Errorf("querysPerConn %d < 0", l.QuerysPerConn)
+	} else if l.QuerysPerConn == 0 {
+		l.QuerysPerConn = 1
+	}
+
 	return l.Timeout.parse()
 }
 
@@ -594,7 +608,7 @@ func (dod *DODServer) parse() error {
 			return err
 		}
 		// only tcp enable connection pool
-		dod.ConnectionPoolTCP = libnamed.NewDnsConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+		dod.ConnectionPoolTCP = libnamed.NewConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (interface{}, error) {
 			return dod.ClientTCP.Dial(dod.Server)
 		})
 	}
@@ -715,7 +729,7 @@ func (dot *DOTServer) parse() error {
 			return err
 		}
 
-		dot.ConnectionPool = libnamed.NewDnsConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (*dns.Conn, error) {
+		dot.ConnectionPool = libnamed.NewConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (interface{}, error) {
 			return dot.Client.Dial(dot.Server)
 		})
 	}

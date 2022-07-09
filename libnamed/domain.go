@@ -2,22 +2,28 @@ package libnamed
 
 import (
 	"math/rand"
-	"strings"
 	"time"
 )
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 // Make domain become uppercase and lowercase
-// TODO: optimization
-func RandDomain(domain string) string {
-	words := strings.Split(domain, "")
-	length := len(words)
-	for idx, _ := range words {
-		t := time.Now()
-		r := rand.New(rand.NewSource(t.UnixNano() * int64(idx)))
-		idx = r.Intn(length)
-		words[idx] = strings.ToUpper(words[idx])
+func RandomUpperDomain(domain string) string {
+	buf := []byte(domain)
+	k := rand.Int() % len(domain)
+	step := k
+	if step == 0 {
+		step = 1
 	}
-	return strings.Join(words, "")
+	diff := byte('a') - byte('A')
+	for i := k; i < len(buf); i += step {
+		if buf[i] >= 'a' && buf[i] <= 'z' {
+			buf[i] -= diff
+		}
+	}
+	return string(buf)
 }
 
 // Copy From: https://github.com/golang/go/blob/35a588109b2a6d8b610be08d32aaf99ef1549085/src/net/dnsclient.go#L78

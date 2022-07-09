@@ -82,8 +82,9 @@ func query(r *dns.Msg, config *configx.Config, logEvent *zerolog.Event, byPassCa
 	// Filter
 	// 1. validate domain
 	if !libnamed.ValidateDomain(origName) {
-		r.SetReply(r)
-		r.Rcode = dns.RcodeFormatError
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeFormatError
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode])
 		return r, fmt.Errorf("invalid domain base on RFC 1035 and RFC 3696")
 	}
@@ -343,7 +344,7 @@ func subTTL(ttl uint32, skip uint32) uint32 {
 
 func replyUpdateName(r *dns.Msg, oldname string) {
 
-	if len(r.Question) == 0 {
+	if len(r.Question) == 0 || oldname == "" {
 		return
 	}
 	qname := r.Question[0].Name
@@ -374,9 +375,21 @@ func replyUpdateName(r *dns.Msg, oldname string) {
 }
 
 func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
-	rcode := resp.Rcode
-	resp.SetReply(r)
-	resp.Rcode = rcode
+	if resp != r {
+		rcode := resp.Rcode
+		// if resp refer to r, Questions will set as make([]Question, 1), no valid question
+		resp.SetReply(r)
+		resp.Rcode = rcode
+
+		// rfc7873#section-5.2
+		// Fix OPT PSEUDOSECTION COOKIE
+		if opt := r.IsEdns0(); opt != nil {
+			if ropt := resp.IsEdns0(); ropt != nil {
+				// echo cookie
+				*ropt = *opt
+			}
+		}
+	}
 
 	// rfc1035#section-4.1.1:
 	// 1. act as forwarded/authoritative name server, didn't support recursive query
@@ -387,13 +400,5 @@ func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 		resp.RecursionAvailable = true
 	}
 
-	// rfc7873#section-5.2
-	// Fix OPT PSEUDOSECTION COOKIE
-	if opt := r.IsEdns0(); opt != nil {
-		if ropt := resp.IsEdns0(); ropt != nil {
-			// echo cookie
-			*ropt = *opt
-		}
-	}
 	replyUpdateName(resp, oldName)
 }
