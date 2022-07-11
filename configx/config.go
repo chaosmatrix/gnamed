@@ -68,13 +68,13 @@ type Main struct {
 
 // Server -> Listen
 type Listen struct {
-	Addr          string    `json:"addr"`
-	Network       string    `json:"network"`
-	Protocol      string    `json:"protocol"`
-	DohPath       string    `json:"doh_path"` // doh path, default "/dns-query"
-	TlsConfig     TlsConfig `json:"tls_config"`
-	Timeout       Timeout   `json:"timeout"`
-	QuerysPerConn int       `json:"querysPerConn"`
+	Addr           string    `json:"addr"`
+	Network        string    `json:"network"`
+	Protocol       string    `json:"protocol"`
+	DohPath        string    `json:"doh_path"` // doh path, default "/dns-query"
+	TlsConfig      TlsConfig `json:"tls_config"`
+	Timeout        Timeout   `json:"timeout"`
+	QueriesPerConn int       `json:"queriesPerConn"`
 }
 
 // TODO
@@ -405,10 +405,10 @@ func (l *Listen) parse() error {
 		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
 	}
 
-	if l.QuerysPerConn < 0 {
-		return fmt.Errorf("querysPerConn %d < 0", l.QuerysPerConn)
-	} else if l.QuerysPerConn == 0 {
-		l.QuerysPerConn = 1
+	if l.QueriesPerConn < 0 {
+		return fmt.Errorf("queriesPerConn %d < 0", l.QueriesPerConn)
+	} else if l.QueriesPerConn == 0 {
+		l.QueriesPerConn = 1
 	}
 
 	return l.Timeout.parse()

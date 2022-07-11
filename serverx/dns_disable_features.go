@@ -9,6 +9,6 @@ import (
 )
 
 // Dns-Over-Quic
-func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 	panic(libnamed.ErrDisableQuic)
 }

@@ -22,8 +22,12 @@ func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
 	logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoQ)
 	logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", "udp")
 	start := time.Now()
+
+	qId := r.Id
+	r.Id = 0 // RFC Require
 	defer func() {
 		logEvent.Dur("lantancy", time.Since(start)).Msg("")
+		r.Id = qId
 	}()
 
 	qconn, err := quic.DialAddr(doq.Server, doq.TlsConf, doq.QuicConf)
@@ -85,5 +89,7 @@ func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
 		err = resp.Unpack(bs[2:])
 	}
 	logEvent.Err(err)
+
+	resp.Id = qId
 	return resp, err
 }

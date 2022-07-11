@@ -245,12 +245,23 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
 }
 
 func queryDoH(r *dns.Msg, doh *configx.DOHServer) (*dns.Msg, error) {
+	resp := new(dns.Msg)
+	var err error
+
+	qId := r.Id
+	r.Id = 0 // RFC Require
+	defer func() {
+		r.Id = qId
+		resp.Id = qId
+	}()
+
 	switch doh.Format {
 	case configx.DOHMsgTypeJSON:
-		return queryDoHJson(r, doh)
+		resp, err = queryDoHJson(r, doh)
 	case configx.DOHMsgTypeRFC8484:
-		return queryDoHRFC8484(r, doh)
+		resp, err = queryDoHRFC8484(r, doh)
 	default:
-		return r.Copy(), fmt.Errorf("DOH Format '%s' not support", doh.Format)
+		err = fmt.Errorf("DOH Format '%s' not support", doh.Format)
 	}
+	return resp, err
 }

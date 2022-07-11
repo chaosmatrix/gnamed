@@ -389,6 +389,8 @@ func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 				*ropt = *opt
 			}
 		}
+	} else if !resp.Response {
+		resp.Response = true
 	}
 
 	// rfc1035#section-4.1.1:

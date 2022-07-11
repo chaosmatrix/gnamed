@@ -1,6 +1,7 @@
 package serverx
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -250,41 +251,64 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 	c.String(http.StatusOK, string(bmsg))
 }
 
-func serveDoHFunc(listen configx.Listen) {
-	r := gin.New()
-	if os.Getenv(envGinDisableLog) == "" {
-		r.Use(gin.Logger(), gin.Recovery())
-	} else {
-		r.Use(gin.Recovery())
-		gin.DefaultWriter = ioutil.Discard
-		//gin.DefaultErrorWriter = ioutil.Discard
-	}
-	//gin.SetMode(gin.ReleaseMode)
-
-	if listen.DohPath == "" {
-		r.GET("/dns-query", handleDoHRequest)
-		r.POST("/dns-query", handleDoHRequest)
-	} else {
-		r.GET(listen.DohPath, handleDoHRequest)
-		r.POST(listen.DohPath, handleDoHRequest)
-	}
-	if listen.TlsConfig.CertFile == "" {
-		err := r.Run(listen.Addr)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-		if err != nil {
-			panic(err)
-		}
-	}
-}
-
-func serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
-		serveDoHFunc(listen)
+		//serveDoHFunc(listen)
+		r := gin.New()
+		if os.Getenv(envGinDisableLog) == "" {
+			r.Use(gin.Logger(), gin.Recovery())
+		} else {
+			r.Use(gin.Recovery())
+			gin.DefaultWriter = ioutil.Discard
+			//gin.DefaultErrorWriter = ioutil.Discard
+		}
+		//gin.SetMode(gin.ReleaseMode)
+
+		if listen.DohPath == "" {
+			r.GET("/dns-query", handleDoHRequest)
+			r.POST("/dns-query", handleDoHRequest)
+		} else {
+			r.GET(listen.DohPath, handleDoHRequest)
+			r.POST(listen.DohPath, handleDoHRequest)
+		}
+
+		httpSrv := &http.Server{
+			Addr:         listen.Addr,
+			Handler:      r,
+			IdleTimeout:  listen.Timeout.IdleDuration,
+			ReadTimeout:  listen.Timeout.ReadDuration,
+			WriteTimeout: listen.Timeout.WriteDuration,
+		}
+
+		var httpSrvWaitGroup sync.WaitGroup
+		httpSrvWaitGroup.Add(1)
+		go func() {
+			defer httpSrvWaitGroup.Done()
+			if listen.TlsConfig.CertFile == "" {
+				//err := r.Run(listen.Addr)
+				err := httpSrv.ListenAndServe()
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			} else {
+				//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+				err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			}
+		}()
+
+		// shutdown listener
+		srv.waitShutdownSignal()
+
+		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+		err := httpSrv.Shutdown(context.Background())
+		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
+		httpSrvWaitGroup.Wait()
 		wg.Done()
+		logEvent.Msg("server has been shutdown")
 	}()
 }
