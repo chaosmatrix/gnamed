@@ -1,6 +1,7 @@
 package serverx
 
 import (
+	"context"
 	"crypto/hmac"
 	"errors"
 	"fmt"
@@ -235,44 +236,68 @@ func handleRequestAdminCacheDelete(c *gin.Context, logEvent *zerolog.Event, name
 	}
 }
 
-func serveAdminFunc(listen configx.Listen) {
-	// r = gin.Default()
-	// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
-	r := gin.New()
-	if os.Getenv(envGinDisableLog) == "" {
-		r.Use(gin.Logger(), gin.Recovery())
-	} else {
-		r.Use(gin.Recovery())
-		gin.DefaultWriter = ioutil.Discard
-		//gin.DefaultErrorWriter = ioutil.Discard
-	}
-	//gin.SetMode(gin.ReleaseMode)
-
-	cachePath := path.Join(listen.DohPath, "/cache/:action")
-	r.GET(cachePath, handleRequestAdminCache)
-	r.POST(cachePath, handleRequestAdminCache)
-
-	configPath := path.Join(listen.DohPath, "/config/:action")
-	r.GET(configPath, handleRequestAdminConfig)
-	r.POST(configPath, handleRequestAdminConfig)
-
-	if listen.TlsConfig.CertFile == "" {
-		err := r.Run(listen.Addr)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-		if err != nil {
-			panic(err)
-		}
-	}
-}
-
-func serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
-		serveAdminFunc(listen)
+		//serveAdminFunc(listen)
+		// r = gin.Default()
+		// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
+		r := gin.New()
+		if os.Getenv(envGinDisableLog) == "" {
+			r.Use(gin.Logger(), gin.Recovery())
+		} else {
+			r.Use(gin.Recovery())
+			gin.DefaultWriter = ioutil.Discard
+			//gin.DefaultErrorWriter = ioutil.Discard
+		}
+		//gin.SetMode(gin.ReleaseMode)
+
+		cachePath := path.Join(listen.DohPath, "/cache/:action")
+		r.GET(cachePath, handleRequestAdminCache)
+		r.POST(cachePath, handleRequestAdminCache)
+
+		configPath := path.Join(listen.DohPath, "/config/:action")
+		r.GET(configPath, handleRequestAdminConfig)
+		r.POST(configPath, handleRequestAdminConfig)
+
+		httpSrv := &http.Server{
+			Addr:         listen.Addr,
+			Handler:      r,
+			IdleTimeout:  listen.Timeout.IdleDuration,
+			ReadTimeout:  listen.Timeout.ReadDuration,
+			WriteTimeout: listen.Timeout.WriteDuration,
+		}
+
+		var httpSrvWaitGroup sync.WaitGroup
+		httpSrvWaitGroup.Add(1)
+		go func() {
+			defer httpSrvWaitGroup.Done()
+			if listen.TlsConfig.CertFile == "" {
+				//err := r.Run(listen.Addr)
+				err := httpSrv.ListenAndServe()
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			} else {
+				//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+				err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			}
+		}()
+
+		// shutdown listener
+		<-srv.shutdownChan
+		libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+		srv.shutdownChan <- struct{}{} // refill to signal other server shutdown
+
+		err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
+		logEvent := libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
+		httpSrvWaitGroup.Wait()
+
 		wg.Done()
+		logEvent.Msg("server has been shutdown")
 	}()
 }

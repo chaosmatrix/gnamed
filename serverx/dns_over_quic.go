@@ -39,7 +39,7 @@ type quicServerOption struct {
 
 func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 	defer conn.CloseWithError(0, "")
-	var wg sync.WaitGroup
+	var streamWaitGroup sync.WaitGroup
 
 	for c := 0; c < qs.maxAcceptedStream; c++ {
 		ctx, cancel := context.WithTimeout(conn.Context(), qs.connIdleTimeout)
@@ -52,7 +52,7 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 		} else {
 			cancel()
 		}
-		wg.Add(1)
+		streamWaitGroup.Add(1)
 
 		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
 
@@ -64,10 +64,10 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 			qs.handleStream(stream, logEvent)
 
 			logEvent.Dur("latency", time.Since(start)).Err(stream.Close()).Msg("")
-			wg.Done()
+			streamWaitGroup.Done()
 		}(logEvent)
 	}
-	wg.Wait()
+	streamWaitGroup.Wait()
 }
 
 func (qs *quicServerOption) handleStream(stream quic.Stream, logEvent *zerolog.Event) error {
@@ -139,7 +139,7 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, logEvent *zerolog.E
 	return nil
 }
 
-func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func(addr string, network string) {
 		cert, err := tls.LoadX509KeyPair(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
@@ -150,7 +150,17 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 			Certificates: []tls.Certificate{cert},
 			NextProtos:   []string{"doq-i02", "doq-i00", "dq", "doq"},
 		}
-		qlisten, err := quic.ListenAddr(addr, tlsConfig, nil)
+
+		qConfig := &quic.Config{
+			HandshakeIdleTimeout:       listen.Timeout.ConnectDuration,
+			MaxIdleTimeout:             listen.Timeout.IdleDuration,
+			MaxIncomingStreams:         int64(listen.QueriesPerConn), // limit accepted streams, when reached, Accept call will block until idleTimeout
+			MaxIncomingUniStreams:      -1,                           // disallow
+			MaxStreamReceiveWindow:     maxDnsQueryMsgSize,
+			MaxConnectionReceiveWindow: uint64(maxDnsQueryMsgSize * listen.QueriesPerConn),
+		}
+
+		qlisten, err := quic.ListenAddr(addr, tlsConfig, qConfig)
 		if err != nil {
 			panic(err)
 		}
@@ -164,23 +174,48 @@ func serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 			},
 		}
 
-		qs := quicServerOption{
+		qs := &quicServerOption{
 			streamWriteTimeout: listen.Timeout.WriteDuration,
 			streamReadTimeout:  listen.Timeout.ReadDuration,
 			bytesPool:          bytesPool,
-			maxAcceptedStream:  listen.QuerysPerConn,
+			maxAcceptedStream:  listen.QueriesPerConn,
 			connIdleTimeout:    listen.Timeout.IdleDuration,
 		}
-		for {
-			qconn, err := qlisten.Accept(context.Background())
-			if err != nil {
-				libnamed.Logger.Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
-				continue
-			}
 
-			go qs.handleConnection(qconn)
-		}
+		wg.Add(1)
+		go func() {
+			var connWaitGroup sync.WaitGroup
+			for {
+				qconn, err := qlisten.Accept(context.Background())
+				if err != nil {
+					libnamed.Logger.Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
+					if err == quic.ErrServerClosed {
+						// active close listener
+						break
+					}
+					// TODO, should always continue ?
+					continue
+				}
+
+				connWaitGroup.Add(1)
+				go func() {
+					qs.handleConnection(qconn)
+					connWaitGroup.Done()
+				}()
+			}
+			connWaitGroup.Wait()
+			wg.Done()
+		}()
+
+		// shutdown listener
+		srv.waitShutdownSignal()
+
+		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+		err = qlisten.Close()
+		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
 		wg.Done()
+		logEvent.Msg("server has been shutdown")
 	}(listen.Addr, listen.Network)
 }
 

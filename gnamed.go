@@ -6,7 +6,10 @@ import (
 	"gnamed/cachex"
 	"gnamed/libnamed"
 	"gnamed/serverx"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"gnamed/configx"
@@ -58,7 +61,26 @@ func main() {
 	cachex.InitCache(cfg.Server.Cache.Mode)
 
 	var wg sync.WaitGroup
-	serverx.Serve(cfg, &wg)
+
+	srv := serverx.NewServerMux()
+	srv.Serve(cfg, &wg)
+
+	signalChan := make(chan os.Signal, 1)
+	signals := []os.Signal{syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP}
+	signal.Notify(signalChan, signals...)
+	for {
+		sg := <-signalChan
+		logEvent := libnamed.Logger.Debug().Str("log_type", "main").Str("signal", sg.String())
+		if sg == syscall.SIGHUP {
+			logEvent.Msg("server start reload configuration")
+			srv.Reload()
+		} else {
+			logEvent.Msg("server start shutdown")
+			srv.Shutdown()
+			break
+		}
+	}
+
 	wg.Wait()
 
 	fakeTimer.Stop()

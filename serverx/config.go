@@ -3,6 +3,7 @@ package serverx
 import (
 	"gnamed/configx"
 	"sync"
+	"time"
 )
 
 var globalServerConfig *serverConfig
@@ -18,6 +19,11 @@ func getGlobalConfig() *configx.Config {
 }
 
 func updateGlobalConfig() (*configx.Config, error) {
+
+	// limit config update frequence
+	if time.Since(getGlobalConfig().GetTimestamp()) < 3*time.Second {
+		time.Sleep(3 * time.Second)
+	}
 
 	globalServerConfig.lock.Lock()
 	defer globalServerConfig.lock.Unlock()

@@ -5,6 +5,7 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"sync"
+	"time"
 )
 
 var (
@@ -15,7 +16,42 @@ const (
 	envGinDisableLog = "GIN_DISABLELOG"
 )
 
-func Serve(config *configx.Config, wg *sync.WaitGroup) {
+type ServerMux struct {
+	shutdownChan chan struct{}
+	shutdowns    []func(time.Duration) error
+}
+
+func NewServerMux() *ServerMux {
+	return &ServerMux{
+		shutdownChan: make(chan struct{}, 1),
+	}
+}
+
+// register funcs that will execute on shutdown
+func (srv *ServerMux) registerOnShutdown(f func(time.Duration) error) {
+	srv.shutdowns = append(srv.shutdowns, f)
+}
+
+func (srv *ServerMux) Reload() error {
+	logEvent := libnamed.Logger.Debug().Str("log_type", "server")
+	_, err := updateGlobalConfig()
+	logEvent.Err(err).Msg("reload config")
+	return err
+}
+
+func (srv *ServerMux) Shutdown() error {
+	srv.shutdownChan <- struct{}{}
+	return nil
+}
+
+// block until receive shutdown signal
+func (srv *ServerMux) waitShutdownSignal() {
+	<-srv.shutdownChan
+	// refill to support call multi times
+	srv.shutdownChan <- struct{}{}
+}
+
+func (srv *ServerMux) Serve(config *configx.Config, wg *sync.WaitGroup) {
 	sc := &serverConfig{
 		configs: make([]*configx.Config, 2),
 		currId:  0,
@@ -34,13 +70,13 @@ func Serve(config *configx.Config, wg *sync.WaitGroup) {
 		logEvent := libnamed.Logger.Trace().Str("log_type", "server").Str("address", sls[i].Addr).Str("network", sls[i].Network).Str("protocol", sls[i].Protocol)
 		switch sls[i].Protocol {
 		case configx.ProtocolTypeDNS:
-			serveDoD(sls[i], wg)
+			srv.serveDoD(sls[i], wg)
 		case configx.ProtocolTypeDoH:
-			serveDoH(sls[i], wg)
+			srv.serveDoH(sls[i], wg)
 		case configx.ProtocolTypeDoT:
-			serveDoT(sls[i], wg)
+			srv.serveDoT(sls[i], wg)
 		case configx.ProtocolTypeDoQ:
-			serveDoQ(sls[i], wg)
+			srv.serveDoQ(sls[i], wg)
 		default:
 			logEvent.Err(errServerProtocolUnsupport)
 		}
@@ -49,7 +85,7 @@ func Serve(config *configx.Config, wg *sync.WaitGroup) {
 
 	als := cfg.Admin.Listen
 	for i := 0; i < len(als); i++ {
-		serveAdmin(als[i], wg)
+		srv.serveAdmin(als[i], wg)
 		libnamed.Logger.Trace().Str("log_type", "admin").Str("address", als[i].Addr).Str("network", als[i].Network).Str("protocol", als[i].Protocol).Msg("")
 	}
 }
