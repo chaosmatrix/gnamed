@@ -288,10 +288,9 @@ func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 		}()
 
 		// shutdown listener
-		<-srv.shutdownChan
-		libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		srv.shutdownChan <- struct{}{} // refill to signal other server shutdown
+		srv.waitShutdownSignal()
 
+		libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 		err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
 		logEvent := libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
