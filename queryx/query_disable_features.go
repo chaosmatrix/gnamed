@@ -9,6 +9,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
+func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error) {
 	return nil, libnamed.ErrDisableQuic
 }

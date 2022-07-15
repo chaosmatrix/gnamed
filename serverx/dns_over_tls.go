@@ -35,25 +35,18 @@ func (srv *ServerMux) serveDoT(listen configx.Listen, wg *sync.WaitGroup) {
 		mux.HandleFunc(".", handleDoDRequest)
 		dos.Handler = mux
 
-		var dnsSrvWaitGroup sync.WaitGroup
-		dnsSrvWaitGroup.Add(1)
-		go func() {
-			defer dnsSrvWaitGroup.Done()
-			err := dos.ListenAndServe()
-			if err != nil {
-				panic(err)
-			}
-		}()
+		srv.registerOnShutdown(func() {
+			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			err := dos.Shutdown()
+			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
-		// shutdown listener
-		srv.waitShutdownSignal()
+			logEvent.Msg("server has been shutdown")
+			wg.Done()
+		})
 
-		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		err = dos.Shutdown()
-		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
-
-		dnsSrvWaitGroup.Wait()
-		wg.Done()
-		logEvent.Msg("server has been shutdown")
+		err = dos.ListenAndServe()
+		if err != nil {
+			panic(err)
+		}
 	}(listen.Addr, listen.Network)
 }

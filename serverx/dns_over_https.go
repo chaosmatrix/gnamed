@@ -2,7 +2,7 @@ package serverx
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"gnamed/configx"
@@ -20,10 +20,38 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func handleDoHRequest(c *gin.Context) {
-	start := time.Now()
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+// https://github.com/gin-contrib/cors
+func corsHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		enableCors(c)
+	}
+}
 
-	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
+func enableCors(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Methods", "GET, POST")
+	c.Header("Access-Control-Allow-Headers", "Content-Type")
+	c.Header("Access-Control-Allow-Credentials", "true")
+}
+
+func handleCorsPreflight(c *gin.Context) {
+	if c.Request.Method == http.MethodOptions {
+		c.String(http.StatusNoContent, "")
+		return
+	}
+
+	c.String(http.StatusMethodNotAllowed, "")
+}
+
+func handleDoHRequest(c *gin.Context) {
+
+	dc := &libnamed.DConnection{
+		IncomingMsg: nil,
+		Log:         libnamed.Logger.Debug(),
+	}
+	start := time.Now()
+	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
 
 	logEvent.Str("clientip", c.ClientIP()).Str("method", c.Request.Method).Str("accept", c.GetHeader("Accept")).Str("uri", c.Request.URL.RequestURI())
 
@@ -38,15 +66,15 @@ func handleDoHRequest(c *gin.Context) {
 	case configx.DOHAcceptHeaderTypeJSON:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeJSON))
-		handleDoHRequestJSON(c, logEvent)
+		handleDoHRequestJSON(c, dc)
 	case configx.DOHAccetpHeaderTypeRFC8484:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeRFC8484))
-		handleDoHRequestRFC8484(c, logEvent)
+		handleDoHRequestRFC8484(c, dc)
 	default:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeJSON))
-		handleDoHRequestJSON(c, logEvent)
+		handleDoHRequestJSON(c, dc)
 	}
 	logEvent.Dur("latency", time.Since(start)).Msg("")
 }
@@ -78,8 +106,9 @@ func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
 // 2. 1.1.1.1 https://developers.cloudflare.com/1.1.1.1/encrypted-dns/dns-over-https/make-api-requests/dns-json
 // 3. nextdns
 //
-func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
+func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 
+	logEvent := dc.Log
 	qname, found := c.GetQuery("name")
 	if !found {
 		logEvent.Err(errors.New("bad request, query_name name not found"))
@@ -116,8 +145,9 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 	r.RecursionDesired = true
 	r.Question = []dns.Question{q}
 
+	dc.IncomingMsg = r
 	cfg := getGlobalConfig()
-	rmsg, err := queryx.Query(r, cfg, logEvent)
+	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
 		handleDoHRequestBadRequest(c, logEvent)
@@ -192,7 +222,9 @@ func handleDoHRequestJSON(c *gin.Context, logEvent *zerolog.Event) {
 // 1. header: "Content-Type: dns-message"
 // 2. body: DNS wireformat
 //
-func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
+func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
+
+	logEvent := dc.Log
 
 	var bs []byte
 	var err error
@@ -204,9 +236,10 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 			handleDoHRequestBadRequest(c, logEvent)
 			return
 		}
-		bs, err = hex.DecodeString(hexStr)
+		//bs, err = hex.DecodeString(hexStr)
+		bs, err = base64.RawURLEncoding.DecodeString(hexStr)
 	case http.MethodPost:
-		if c.GetHeader("Content-Type") == string(configx.DOHAccetpHeaderTypeRFC8484) {
+		if c.GetHeader("Content-Type") != string(configx.DOHAccetpHeaderTypeRFC8484) {
 			logEvent.Int("status_code", http.StatusMethodNotAllowed)
 			c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
 			return
@@ -232,8 +265,9 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 		return
 	}
 
+	dc.IncomingMsg = r
 	cfg := getGlobalConfig()
-	rmsg, err := queryx.Query(r, cfg, logEvent)
+	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
 		handleDoHRequestBadRequest(c, logEvent)
@@ -248,6 +282,7 @@ func handleDoHRequestRFC8484(c *gin.Context, logEvent *zerolog.Event) {
 	}
 	c.Header("Content-Type", c.GetHeader("Accept"))
 	logEvent.Int("status_code", http.StatusOK)
+
 	c.String(http.StatusOK, string(bmsg))
 }
 
@@ -264,13 +299,16 @@ func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
 			//gin.DefaultErrorWriter = ioutil.Discard
 		}
 		//gin.SetMode(gin.ReleaseMode)
+		r.Use(corsHandler())
 
 		if listen.DohPath == "" {
 			r.GET("/dns-query", handleDoHRequest)
 			r.POST("/dns-query", handleDoHRequest)
+			r.OPTIONS("/dns-query", handleCorsPreflight)
 		} else {
 			r.GET(listen.DohPath, handleDoHRequest)
 			r.POST(listen.DohPath, handleDoHRequest)
+			r.OPTIONS(listen.DohPath, handleCorsPreflight)
 		}
 
 		httpSrv := &http.Server{
@@ -281,34 +319,27 @@ func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
 			WriteTimeout: listen.Timeout.WriteDuration,
 		}
 
-		var httpSrvWaitGroup sync.WaitGroup
-		httpSrvWaitGroup.Add(1)
-		go func() {
-			defer httpSrvWaitGroup.Done()
-			if listen.TlsConfig.CertFile == "" {
-				//err := r.Run(listen.Addr)
-				err := httpSrv.ListenAndServe()
-				if err != nil && err != http.ErrServerClosed {
-					panic(err)
-				}
-			} else {
-				//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-				err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-				if err != nil && err != http.ErrServerClosed {
-					panic(err)
-				}
+		srv.registerOnShutdown(func() {
+			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			err := httpSrv.Shutdown(context.Background())
+			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
+			wg.Done()
+			logEvent.Msg("server has been shutdown")
+		})
+
+		if listen.TlsConfig.CertFile == "" {
+			//err := r.Run(listen.Addr)
+			err := httpSrv.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				panic(err)
 			}
-		}()
-
-		// shutdown listener
-		srv.waitShutdownSignal()
-
-		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		err := httpSrv.Shutdown(context.Background())
-		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
-
-		httpSrvWaitGroup.Wait()
-		wg.Done()
-		logEvent.Msg("server has been shutdown")
+		} else {
+			//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+			err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+			if err != nil && err != http.ErrServerClosed {
+				panic(err)
+			}
+		}
 	}()
 }

@@ -1,32 +1,41 @@
 package queryx
 
 import (
-	"fmt"
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"time"
+	"unsafe"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
-func queryDoD(r *dns.Msg, dod *configx.DODServer) (*dns.Msg, error) {
+func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error) {
+
+	r := dc.IncomingMsg
+	logEvent := dc.Log
+
 	resp := new(dns.Msg)
 	var err error
 	var rtt time.Duration = 0
+
+	eventArr := zerolog.Arr()
+	subEvent := zerolog.Dict()
 	for _, client := range []*dns.Client{dod.ClientUDP, dod.ClientTCP} {
 		if client == nil {
 			continue
 		}
 
-		logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDNS)
-		logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", client.Net)
+		subEvent.Str("protocol", configx.ProtocolTypeDNS).Str("server", dod.Server).Str("network", dod.Network).
+			Uint16("id", r.Id).Str("name", r.Question[0].Name)
 
 		if dod.ConnectionPoolTCP != nil {
 			vconn, _rtt, cached, _err := dod.ConnectionPoolTCP.Get()
 			conn, _ := vconn.(*dns.Conn)
-			logEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
+			subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
 			if _err == nil {
-				logEvent.Str("connection_pointer", fmt.Sprintf("%p", conn))
+
+				subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&conn)))
 				resp, rtt, err = client.ExchangeWithConn(r, conn)
 			}
 			if _err != nil || err != nil {
@@ -41,19 +50,23 @@ func queryDoD(r *dns.Msg, dod *configx.DODServer) (*dns.Msg, error) {
 		} else {
 			resp, rtt, err = client.Exchange(r, dod.Server)
 		}
-		logEvent.Dur("latency", rtt)
+		subEvent.Dur("latency", rtt)
 		if err != nil {
-			logEvent.Err(err).Msg("")
-			return resp, err
+			break
 		}
 		if resp.Truncated {
 			// re-send via tcp
-			logEvent.Bool("truncated", true).Msg("")
+			subEvent.Bool("truncated", true).Err(err)
+			eventArr.Dict(subEvent)
+			subEvent = zerolog.Dict()
 			continue
 		}
-		logEvent.Msg("")
 		break
 	}
 
-	return resp, nil
+	subEvent.Err(err)
+	eventArr.Dict(subEvent)
+	logEvent.Array("queries", eventArr)
+
+	return resp, err
 }

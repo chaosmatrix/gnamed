@@ -1,17 +1,23 @@
 package queryx
 
 import (
-	"fmt"
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"time"
+	"unsafe"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
-func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
-	logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoT)
-	logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", "tcp-tls")
+func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error) {
+
+	r := dc.IncomingMsg
+
+	subEvent := zerolog.Dict()
+
+	subEvent.Str("protocol", configx.ProtocolTypeDoT).Str("network", "tcp-tls")
+	subEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name)
 
 	var resp *dns.Msg
 	var err error
@@ -20,9 +26,9 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
 	if dot.ConnectionPool != nil {
 		vconn, _rtt, cached, _err := dot.ConnectionPool.Get()
 		conn, _ := vconn.(*dns.Conn)
-		logEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
+		subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
 		if _err == nil {
-			logEvent.Str("connection_pointer", fmt.Sprintf("%p", conn))
+			subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&conn)))
 			resp, rtt, err = dot.Client.ExchangeWithConn(r, conn)
 		}
 		if _err != nil || err != nil {
@@ -39,14 +45,11 @@ func queryDoT(r *dns.Msg, dot *configx.DOTServer) (*dns.Msg, error) {
 	} else {
 		resp, rtt, err = dot.Client.Exchange(r, dot.Server)
 	}
-	logEvent.Dur("latency", rtt)
-	if err != nil {
-		logEvent.Err(err).Msg("")
-		rmsg := new(dns.Msg)
-		rmsg.SetReply(r)
-		rmsg.Rcode = dns.RcodeServerFailure
-		return rmsg, err
-	}
-	logEvent.Msg("")
-	return resp, nil
+	subEvent.Dur("latency", rtt)
+
+	subEvent.Err(err)
+
+	dc.Log.Array("quries", zerolog.Arr().Dict(subEvent))
+
+	return resp, err
 }
