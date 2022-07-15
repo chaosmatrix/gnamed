@@ -268,35 +268,27 @@ func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 			WriteTimeout: listen.Timeout.WriteDuration,
 		}
 
-		var httpSrvWaitGroup sync.WaitGroup
-		httpSrvWaitGroup.Add(1)
-		go func() {
-			defer httpSrvWaitGroup.Done()
-			if listen.TlsConfig.CertFile == "" {
-				//err := r.Run(listen.Addr)
-				err := httpSrv.ListenAndServe()
-				if err != nil && err != http.ErrServerClosed {
-					panic(err)
-				}
-			} else {
-				//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-				err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-				if err != nil && err != http.ErrServerClosed {
-					panic(err)
-				}
+		srv.registerOnShutdown(func() {
+			libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
+			logEvent := libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
+			wg.Done()
+			logEvent.Msg("server has been shutdown")
+		})
+
+		if listen.TlsConfig.CertFile == "" {
+			//err := r.Run(listen.Addr)
+			err := httpSrv.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				panic(err)
 			}
-		}()
-
-		// shutdown listener
-		srv.waitShutdownSignal()
-
-		libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
-		logEvent := libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
-
-		httpSrvWaitGroup.Wait()
-
-		wg.Done()
-		logEvent.Msg("server has been shutdown")
+		} else {
+			//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+			err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+			if err != nil && err != http.ErrServerClosed {
+				panic(err)
+			}
+		}
 	}()
 }

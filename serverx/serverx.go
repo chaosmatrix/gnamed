@@ -5,7 +5,6 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"sync"
-	"time"
 )
 
 var (
@@ -17,19 +16,23 @@ const (
 )
 
 type ServerMux struct {
+	lock         sync.Mutex
 	shutdownChan chan struct{}
-	shutdowns    []func(time.Duration) error
+	shutdowns    []func()
 }
 
 func NewServerMux() *ServerMux {
 	return &ServerMux{
 		shutdownChan: make(chan struct{}, 1),
+		shutdowns:    []func(){},
 	}
 }
 
 // register funcs that will execute on shutdown
-func (srv *ServerMux) registerOnShutdown(f func(time.Duration) error) {
+func (srv *ServerMux) registerOnShutdown(f func()) {
+	srv.lock.Lock()
 	srv.shutdowns = append(srv.shutdowns, f)
+	srv.lock.Unlock()
 }
 
 func (srv *ServerMux) Reload() error {
@@ -41,6 +44,12 @@ func (srv *ServerMux) Reload() error {
 
 func (srv *ServerMux) Shutdown() error {
 	srv.shutdownChan <- struct{}{}
+
+	srv.lock.Lock()
+	for i := range srv.shutdowns {
+		srv.shutdowns[i]()
+	}
+	srv.lock.Unlock()
 	return nil
 }
 

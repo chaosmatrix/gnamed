@@ -13,15 +13,20 @@ import (
 )
 
 func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
+	dc := &libnamed.DConnection{
+		IncomingMsg: r,
+		Log:         libnamed.Logger.Debug(),
+	}
+
 	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-	logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("client_network", w.RemoteAddr().Network()).Str("clientip", clientip)
+	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
 	start := time.Now()
 	defer func() {
 		logEvent.Dur("latency", time.Since(start)).AnErr("server_error", w.Close()).Msg("")
 	}()
 
 	cfg := getGlobalConfig()
-	rmsg, err := queryx.Query(r, cfg, logEvent)
+	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.AnErr("query_error", err)
 	}
@@ -50,25 +55,19 @@ func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 		dos.Handler = mux
 		//dns.HandleFunc(".", handleFunc)
 
-		var dnsSrvWaitGroup sync.WaitGroup
-		dnsSrvWaitGroup.Add(1)
-		go func() {
-			defer dnsSrvWaitGroup.Done()
-			err := dos.ListenAndServe()
-			if err != nil {
-				panic(err)
-			}
-		}()
+		srv.registerOnShutdown(func() {
+			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			err := dos.Shutdown()
+			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
-		// shutdown listener
-		srv.waitShutdownSignal()
+			wg.Done()
+			logEvent.Msg("server has been shutdown")
+		})
 
-		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		err := dos.Shutdown()
-		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+		err := dos.ListenAndServe()
+		if err != nil {
+			panic(err)
+		}
 
-		dnsSrvWaitGroup.Wait()
-		wg.Done()
-		logEvent.Msg("server has been shutdown")
 	}(listen.Addr, listen.Network)
 }

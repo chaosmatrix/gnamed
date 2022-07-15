@@ -559,18 +559,16 @@ func (dod *DODServer) parse() error {
 
 	dod.Timeout.parse()
 
-	if dod.Network != "tcp" {
-		dod.ClientUDP = &dns.Client{
-			// Default buffer size to use to read incoming UDP message
-			// default 512 B
-			// must increase if edns-client-sub enable
-			UDPSize:      1024,
-			Net:          "udp",
-			DialTimeout:  dod.Timeout.ConnectDuration,
-			ReadTimeout:  dod.Timeout.ReadDuration,
-			WriteTimeout: dod.Timeout.WriteDuration,
-			//SingleInflight: true,
-		}
+	dod.ClientUDP = &dns.Client{
+		// Default buffer size to use to read incoming UDP message
+		// default 512 B
+		// must increase if edns-client-sub enable
+		UDPSize:      1024,
+		Net:          "udp",
+		DialTimeout:  dod.Timeout.ConnectDuration,
+		ReadTimeout:  dod.Timeout.ReadDuration,
+		WriteTimeout: dod.Timeout.WriteDuration,
+		//SingleInflight: true,
 	}
 
 	dod.ClientTCP = &dns.Client{

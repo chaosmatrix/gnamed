@@ -15,7 +15,6 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
-	"github.com/rs/zerolog"
 )
 
 const (
@@ -44,9 +43,15 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 	for c := 0; c < qs.maxAcceptedStream; c++ {
 		ctx, cancel := context.WithTimeout(conn.Context(), qs.connIdleTimeout)
 		stream, err := conn.AcceptStream(ctx)
+		dc := &libnamed.DConnection{
+			IncomingMsg: nil,
+			Log:         libnamed.Logger.Debug(),
+		}
+		logEvent := dc.Log
+		logEvent.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
 		if err != nil {
 			// client close connection or idle timeout
-			libnamed.Logger.Trace().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("connection", fmt.Sprintf("%p", conn)).Err(err).Msg("no more stream avaliable, connection idleTimeout or peer close it")
+			logEvent.Err(err).Msg("no more stream avaliable, connection idleTimeout or peer close it")
 			cancel()
 			break
 		} else {
@@ -54,26 +59,25 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 		}
 		streamWaitGroup.Add(1)
 
-		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
-
-		go func(logEvent *zerolog.Event) {
+		go func(stream quic.Stream, dc *libnamed.DConnection) {
 			//logEvent.Str("stream_id", fmt.Sprintf("%d", stream.StreamID()))
-			logEvent.Int64("stream_id", int64(stream.StreamID()))
+			dc.Log.Int64("stream_id", int64(stream.StreamID()))
 			start := time.Now()
 
-			qs.handleStream(stream, logEvent)
+			qs.handleStream(stream, dc)
 
-			logEvent.Dur("latency", time.Since(start)).Err(stream.Close()).Msg("")
+			dc.Log.Dur("latency", time.Since(start)).Err(stream.Close()).Msg("")
 			streamWaitGroup.Done()
-		}(logEvent)
+		}(stream, dc)
 	}
 	streamWaitGroup.Wait()
 }
 
-func (qs *quicServerOption) handleStream(stream quic.Stream, logEvent *zerolog.Event) error {
+func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConnection) error {
 	buf := qs.bytesPool.Get().([]byte)
 	defer qs.bytesPool.Put(buf)
 
+	logEvent := dc.Log
 	if err := stream.SetWriteDeadline(time.Now().Add(qs.streamReadTimeout)); err != nil {
 		logEvent.Err(err)
 		return err
@@ -87,10 +91,10 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, logEvent *zerolog.E
 	draft := false
 	pktLen := binary.BigEndian.Uint16(buf[:2])
 	if pktLen == uint16(n-2) {
-		logEvent.Str("doq_version", "rfc9250")
+		logEvent.Str("receive_doq_version", "rfc9250")
 	} else {
 		draft = true
-		logEvent.Str("doq_version", "draft")
+		logEvent.Str("receive_doq_version", "draft")
 	}
 
 	r := new(dns.Msg)
@@ -112,8 +116,10 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, logEvent *zerolog.E
 		}
 	}
 
+	dc.IncomingMsg = r
+
 	cfg := getGlobalConfig()
-	resp, err := queryx.Query(r, cfg, logEvent)
+	resp, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
 		return err
@@ -182,40 +188,36 @@ func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 			connIdleTimeout:    listen.Timeout.IdleDuration,
 		}
 
-		wg.Add(1)
-		go func() {
-			var connWaitGroup sync.WaitGroup
-			for {
-				qconn, err := qlisten.Accept(context.Background())
-				if err != nil {
-					libnamed.Logger.Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
-					if err == quic.ErrServerClosed {
-						// active close listener
-						break
-					}
-					// TODO, should always continue ?
-					continue
-				}
+		srv.registerOnShutdown(func() {
+			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			err := qlisten.Close()
+			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
-				connWaitGroup.Add(1)
-				go func() {
-					qs.handleConnection(qconn)
-					connWaitGroup.Done()
-				}()
-			}
-			connWaitGroup.Wait()
 			wg.Done()
-		}()
+			logEvent.Msg("server has been shutdown")
+		})
 
-		// shutdown listener
-		srv.waitShutdownSignal()
+		var connWaitGroup sync.WaitGroup
+		for {
+			qconn, err := qlisten.Accept(context.Background())
+			if err != nil {
+				libnamed.Logger.Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
+				if err == quic.ErrServerClosed {
+					// active close listener
+					break
+				}
+				// TODO, should always continue ?
+				continue
+			}
 
-		libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-		err = qlisten.Close()
-		logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			connWaitGroup.Add(1)
+			go func() {
+				qs.handleConnection(qconn)
+				connWaitGroup.Done()
+			}()
+		}
+		connWaitGroup.Wait()
 
-		wg.Done()
-		logEvent.Msg("server has been shutdown")
 	}(listen.Addr, listen.Network)
 }
 

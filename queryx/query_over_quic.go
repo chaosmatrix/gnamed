@@ -13,26 +13,34 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
 // TODO:
 // 1. reuse connection
 // 2. group more querys into one connection, use different stream
-func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
-	logEvent := libnamed.Logger.Trace().Str("log_type", "query").Str("protocol", configx.ProtocolTypeDoQ)
-	logEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name).Str("type", dns.TypeToString[r.Question[0].Qtype]).Str("network", "udp")
+func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error) {
+	r := dc.IncomingMsg
+
+	oId := r.Id
+	r.Id = 0
+
+	subEvent := zerolog.Dict()
+
+	subEvent.Str("protocol", configx.ProtocolTypeDoQ).Str("network", "udp").
+		Uint16("id", r.Id).Str("name", r.Question[0].Name)
+
 	start := time.Now()
 
-	qId := r.Id
-	r.Id = 0 // RFC Require
 	defer func() {
-		logEvent.Dur("lantancy", time.Since(start)).Msg("")
-		r.Id = qId
+		r.Id = oId
+		subEvent.Dur("lantancy", time.Since(start))
+		dc.Log.Array("queries", zerolog.Arr().Dict(subEvent))
 	}()
 
 	qconn, err := quic.DialAddr(doq.Server, doq.TlsConf, doq.QuicConf)
 	if err != nil {
-		logEvent.Err(err)
+		subEvent.Err(err)
 		return nil, err
 	}
 	defer qconn.CloseWithError(0, "")
@@ -41,15 +49,15 @@ func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
 	stream, err := qconn.OpenStreamSync(ctx)
 	cancel()
 	if err != nil {
-		logEvent.Err(err)
+		subEvent.Err(err)
 		return nil, err
 	}
 	defer stream.Close()
-	logEvent.Int64("stream_id", int64(stream.StreamID()))
+	subEvent.Int64("stream_id", int64(stream.StreamID()))
 
 	bmsg, err := r.Pack()
 	if err != nil {
-		logEvent.Err(err)
+		subEvent.Err(err)
 		return nil, err
 	}
 
@@ -59,28 +67,24 @@ func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
 		binary.BigEndian.PutUint16(buf, uint16(len(bmsg)))
 		buf = append(buf, bmsg...)
 		bmsg = buf
-		logEvent.Str("doq_version", "rfc9250")
+		subEvent.Str("doq_version", "rfc9250")
 	} else {
-		logEvent.Str("doq_version", "draft")
+		subEvent.Str("doq_version", "draft")
 	}
 
 	_, err = stream.Write(bmsg)
 	if err != nil {
-		logEvent.Err(err)
+		subEvent.Err(err)
 		return nil, err
 	}
 
-	// if resp refer to r, call (*dns.Msg)SetReply(*dns.Msg), will clean Questions Section
-	// for example, response message Questions become (qtype and qclass show incorrect):
-	// example.com.     CLASS0   None
-	resp := new(dns.Msg)
-	resp.SetReply(r)
 	var bs []byte
 	if bs, err = io.ReadAll(stream); err != nil {
-		logEvent.Err(err)
-		return resp, err
+		subEvent.Err(err)
+		return nil, err
 	}
 
+	resp := new(dns.Msg)
 	if doq.Draft {
 		err = resp.Unpack(bs)
 	} else if len(bs) < 2 {
@@ -88,8 +92,8 @@ func queryDoQ(r *dns.Msg, doq *configx.DOQServer) (*dns.Msg, error) {
 	} else {
 		err = resp.Unpack(bs[2:])
 	}
-	logEvent.Err(err)
+	subEvent.Err(err)
 
-	resp.Id = qId
+	resp.Id = oId
 	return resp, err
 }
