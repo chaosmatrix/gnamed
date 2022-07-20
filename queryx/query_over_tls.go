@@ -38,12 +38,21 @@ func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error
 			}
 			// failed to get connection from pool or conn from pool invalid
 			// retry with new conn
-			resp, rtt, err = dot.Client.Exchange(r, dot.Server)
+			conn, err = dot.NewConn(dot.Client.Net)
+			if err == nil {
+				resp, rtt, err = dot.Client.ExchangeWithConn(r, conn)
+				conn.Close()
+			}
 		} else {
 			dot.ConnectionPool.Put(conn)
 		}
 	} else {
-		resp, rtt, err = dot.Client.Exchange(r, dot.Server)
+		var conn *dns.Conn
+		conn, err = dot.NewConn(dot.Client.Net)
+		if err == nil {
+			resp, rtt, err = dot.Client.ExchangeWithConn(r, conn)
+			conn.Close()
+		}
 	}
 	subEvent.Dur("latency", rtt)
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 /*
@@ -48,12 +50,17 @@ func (cp *ConnectionPool) Get() (interface{}, time.Duration, bool, error) {
 	freeCnt := len(cp.queue)
 	for i := 0; i < freeCnt; i++ {
 		conn := <-cp.queue
-		if conn.expiredAt > nowUnix {
+		if conn.expiredAt > nowUnix && conn.conn != nil {
 			cp.lock.Unlock()
 			// valid connection
 			// TODO: golang hasn't valid way to test connection has been closed by other side
 			// read 0-byte from conn always return nil https://github.com/golang/go/issues/10940#issuecomment-245773886
 			return conn.conn, time.Since(start), true, nil
+		} else if conn.conn != nil {
+			dnsConn, ok := conn.conn.(*dns.Conn)
+			if ok && dnsConn != nil {
+				dnsConn.Close()
+			}
 		}
 	}
 

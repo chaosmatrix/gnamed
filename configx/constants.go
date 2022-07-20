@@ -30,7 +30,7 @@ const (
 	DefaultPortAdmin = 6677
 
 	DefaultTimeoutDurationIdle    = 30 * time.Second
-	DefaultTimeoutDurationConnect = 5 * time.Second
+	DefaultTimeoutDurationConnect = 2 * time.Second
 	DefaultTimeoutDurationRead    = 5 * time.Second
 	DefaultTimeoutDurationWrite   = 5 * time.Second
 

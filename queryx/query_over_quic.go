@@ -94,6 +94,8 @@ func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error
 	}
 	subEvent.Err(err)
 
-	resp.Id = oId
+	if err == nil {
+		resp.Id = oId
+	}
 	return resp, err
 }
