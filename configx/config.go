@@ -77,10 +77,14 @@ type Listen struct {
 	QueriesPerConn int       `json:"queriesPerConn"`
 }
 
-// TODO
 type SocketAttr struct {
-	KeepAliveNum      int
-	KeepAliveInterval int
+	KeepAliveNum      int  `json:"keepaliveNum"` // golang not support ?
+	KeepAliveInterval int  `json:"keepAliveInterval"`
+	DisableNoDelay    bool `json:"disableNoDelay"` // default enable no delay (seed data immedialy)
+
+	// because of Delay ACK (RFC1122, < 500ms, implementation < 200ms), server might not receive ack about dns respose,
+	// (close) reset connection before Delay ACK send, might trigger some security rule cause client blocked by server
+	CloseWithRst bool `json:"CloseWithRst"` // TCP-only, reset connection to prevent TIME_WAIT (may has previous instantiation problem)
 }
 
 type TlsConfig struct {
@@ -103,14 +107,16 @@ type DODServer struct {
 	Server  string `json:"server"`
 	Network string `json:"network"`
 
-	Timeout Timeout         `json:"timeout"`
-	DnsOpt  *DnsOpt         `json:"dns_opt"`
-	Pool    *ConnectionPool `json:"pool"`
+	Timeout    Timeout         `json:"timeout"`
+	DnsOpt     *DnsOpt         `json:"dns_opt"`
+	Pool       *ConnectionPool `json:"pool"`
+	SocketAttr *SocketAttr     `json:"socketAttr,omitempty"`
 
 	// use internal
-	ClientUDP         *dns.Client              `json:"-"`
-	ClientTCP         *dns.Client              `json:"-"`
-	ConnectionPoolTCP *libnamed.ConnectionPool `json:"-"`
+	ClientUDP         *dns.Client                     `json:"-"`
+	ClientTCP         *dns.Client                     `json:"-"`
+	ConnectionPoolTCP *libnamed.ConnectionPool        `json:"-"`
+	NewConn           func(string) (*dns.Conn, error) `json:"-"`
 }
 
 type DOHMsgType string
@@ -146,13 +152,15 @@ type DOTServer struct {
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
 
-	TlsConfig TlsConfig `json:"tls_config"`
-	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    *DnsOpt   `json:"dns_opt"`
+	TlsConfig  TlsConfig   `json:"tls_config"`
+	Timeout    Timeout     `json:"timeout"`
+	DnsOpt     *DnsOpt     `json:"dns_opt"`
+	SocketAttr *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
-	Client         *dns.Client              `json:"-"`
-	ConnectionPool *libnamed.ConnectionPool `json:"-"`
+	Client         *dns.Client                     `json:"-"`
+	ConnectionPool *libnamed.ConnectionPool        `json:"-"`
+	NewConn        func(string) (*dns.Conn, error) `json:"-"`
 }
 
 type Timeout struct {
@@ -470,9 +478,47 @@ func (t *Timeout) parse() error {
 	return nil
 }
 
+func newDnsConnection(client *dns.Client, socketAttr *SocketAttr, addr string, network string) (*dns.Conn, error) {
+	if network == "udp" || socketAttr == nil {
+		return client.Dial(addr)
+	}
+	// tcp or tcp-tls
+	conn, err := client.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	tcpConn := conn.Conn.(*net.TCPConn)
+	if socketAttr.CloseWithRst {
+		err = tcpConn.SetLinger(0)
+		if err != nil {
+			return conn, err
+		}
+	}
+
+	if socketAttr.KeepAliveInterval > 0 {
+		err = tcpConn.SetKeepAlive(true)
+		if err != nil {
+			return conn, err
+		}
+		err = tcpConn.SetKeepAlivePeriod(time.Duration(socketAttr.KeepAliveInterval) * time.Second)
+		if err != nil {
+			return conn, err
+		}
+	}
+
+	if socketAttr.DisableNoDelay {
+		err = tcpConn.SetNoDelay(false)
+		if err != nil {
+			return conn, err
+		}
+	}
+
+	return conn, err
+}
+
 func (cp *ConnectionPool) parse() error {
 	if cp == nil {
-		return nil
+		return errors.New("invalid connection pool config")
 	}
 
 	if cp.Size == 0 {
@@ -559,16 +605,18 @@ func (dod *DODServer) parse() error {
 
 	dod.Timeout.parse()
 
-	dod.ClientUDP = &dns.Client{
-		// Default buffer size to use to read incoming UDP message
-		// default 512 B
-		// must increase if edns-client-sub enable
-		UDPSize:      1024,
-		Net:          "udp",
-		DialTimeout:  dod.Timeout.ConnectDuration,
-		ReadTimeout:  dod.Timeout.ReadDuration,
-		WriteTimeout: dod.Timeout.WriteDuration,
-		//SingleInflight: true,
+	if dod.Network == "udp" {
+		dod.ClientUDP = &dns.Client{
+			// Default buffer size to use to read incoming UDP message
+			// default 512 B
+			// must increase if edns-client-sub enable
+			UDPSize:      1024,
+			Net:          "udp",
+			DialTimeout:  dod.Timeout.ConnectDuration,
+			ReadTimeout:  dod.Timeout.ReadDuration,
+			WriteTimeout: dod.Timeout.WriteDuration,
+			//SingleInflight: true,
+		}
 	}
 
 	dod.ClientTCP = &dns.Client{
@@ -583,13 +631,21 @@ func (dod *DODServer) parse() error {
 		//SingleInflight: true,
 	}
 
-	if dod.Network == "tcp" {
+	dod.NewConn = func(network string) (*dns.Conn, error) {
+		if network == "udp" {
+			return newDnsConnection(dod.ClientUDP, dod.SocketAttr, dod.Server, network)
+		} else {
+			return newDnsConnection(dod.ClientTCP, dod.SocketAttr, dod.Server, network)
+		}
+	}
+
+	if dod.Network == "tcp" && dod.Pool != nil {
 		if err := dod.Pool.parse(); err != nil {
 			return err
 		}
 		// only tcp enable connection pool
 		dod.ConnectionPoolTCP = libnamed.NewConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (interface{}, error) {
-			return dod.ClientTCP.Dial(dod.Server)
+			return dod.NewConn("tcp")
 		})
 	}
 	return nil
@@ -704,13 +760,17 @@ func (dot *DOTServer) parse() error {
 		//SingleInflight: true,
 	}
 
+	dot.NewConn = func(network string) (*dns.Conn, error) {
+		return newDnsConnection(dot.Client, dot.SocketAttr, dot.Server, dot.Client.Net)
+	}
+
 	if dot.Pool != nil {
 		if err := dot.Pool.parse(); err != nil {
 			return err
 		}
 
 		dot.ConnectionPool = libnamed.NewConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (interface{}, error) {
-			return dot.Client.Dial(dot.Server)
+			return dot.NewConn(dot.Client.Net)
 		})
 	}
 	return nil

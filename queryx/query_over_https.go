@@ -245,6 +245,8 @@ func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error
 	logEvent.Array("queries", zerolog.Arr().Dict(subEvent))
 
 	r.Id = oId
-	resp.Id = oId
+	if err == nil {
+		resp.Id = oId
+	}
 	return resp, err
 }

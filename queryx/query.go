@@ -203,7 +203,9 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 
 	dc.IncomingMsg.Id = oId
-	rmsg.Id = oId
+	if rmsg != nil {
+		rmsg.Id = oId
+	}
 
 	// 4. cache response
 	if err == nil {
@@ -399,6 +401,9 @@ func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 				// echo cookie
 				*ropt = *opt
 			}
+		} else if len(r.Extra) == 0 && len(resp.Extra) != 0 {
+			// clean response Extra
+			resp.Extra = []dns.RR{}
 		}
 	} else if !resp.Response {
 		resp.Response = true

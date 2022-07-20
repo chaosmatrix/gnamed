@@ -30,11 +30,12 @@ func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error
 			Uint16("id", r.Id).Str("name", r.Question[0].Name)
 
 		if dod.ConnectionPoolTCP != nil {
+			// no way to detect vconn already close
+			// write data to "CLOSE_WAIT" is permited, error until read timeout
 			vconn, _rtt, cached, _err := dod.ConnectionPoolTCP.Get()
 			conn, _ := vconn.(*dns.Conn)
 			subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
 			if _err == nil {
-
 				subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&conn)))
 				resp, rtt, err = client.ExchangeWithConn(r, conn)
 			}
@@ -43,12 +44,22 @@ func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error
 					// other side close connection
 					conn.Close() // ignore error
 				}
-				resp, rtt, err = client.Exchange(r, dod.Server)
+
+				conn, err = dod.NewConn(client.Net)
+				if err == nil {
+					resp, rtt, err = client.ExchangeWithConn(r, conn)
+					conn.Close()
+				}
 			} else {
 				dod.ConnectionPoolTCP.Put(conn)
 			}
 		} else {
-			resp, rtt, err = client.Exchange(r, dod.Server)
+			var conn *dns.Conn
+			conn, err = dod.NewConn(client.Net)
+			if err == nil {
+				resp, rtt, err = client.ExchangeWithConn(r, conn)
+				conn.Close()
+			}
 		}
 		subEvent.Dur("latency", rtt)
 		if err != nil {
