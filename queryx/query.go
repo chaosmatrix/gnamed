@@ -73,7 +73,7 @@ func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 	return rmsg, err
 }
 
-func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (*dns.Msg, error) {
+func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dns.Msg, error) {
 
 	r := dc.IncomingMsg
 	logEvent := dc.Log
@@ -95,13 +95,13 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 	}
 
 	// 2. whitelist/blacklist search
-	if _r, _s, _forbidden := config.Query.QueryForbidden(qname, qtype); _forbidden {
+	if _r, _s, _forbidden := cfg.Query.QueryForbidden(qname, qtype); _forbidden {
 		rmsg, err := queryFake(r, nil)
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", _r+"_"+_s)
 		return rmsg, err
 	}
 
-	cname, vname := config.Server.FindRealName(qname)
+	cname, vname := cfg.Server.FindRealName(qname)
 	logEvent.Str("view_name", vname)
 	if cname != outgoingQname {
 		outgoingQname = cname
@@ -113,7 +113,7 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 
 	// 3. cache search
 	if !byPassCache {
-		cacheCfg := config.Server.Cache
+		cacheCfg := cfg.Server.Cache
 		if rmsg, expiredUTC, cacheTTL, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && rmsg != nil && expiredUTC > 0) {
 			nowUTC := libnamed.GetFakeTimerUnixSecond()
 			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && ((cacheCfg.BeforeExpiredSecond > 0 && expiredUTC-cacheCfg.BeforeExpiredSecond <= nowUTC) || (cacheCfg.BeforeExpiredPercent > 0 && expiredUTC-int64((float64(cacheTTL)*cacheCfg.BeforeExpiredPercent)) <= nowUTC)) {
@@ -135,7 +135,7 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 							IncomingMsg: nr,
 							Log:         _logEvent,
 						}
-						_, nerr := query(ndc, config, true)
+						_, nerr := query(ndc, cfg, true)
 						_logEvent.Err(nerr).Msg("")
 					}(r.Copy(), lockKey)
 				}
@@ -155,7 +155,7 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 	}
 
 	// 4. hosts lookup
-	if record, found := config.Server.FindRecordFromHosts(outgoingQname, qtype); found {
+	if record, found := cfg.Server.FindRecordFromHosts(outgoingQname, qtype); found {
 		logEvent.Str("query_type", "hosts")
 		rmsg := new(dns.Msg)
 		rrs := strings.Join([]string{qname, "60", dns.ClassToString[r.Question[0].Qclass], qtype, record}, "    ")
@@ -169,7 +169,7 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 	}
 
 	// 5. external query
-	nameServerTag, nameserver := config.Server.FindViewNameServer(vname)
+	nameServerTag, nameserver := cfg.Server.FindViewNameServer(vname)
 	logEvent.Str("nameserver_tag", nameServerTag)
 
 	if nameserver == nil {
@@ -211,7 +211,7 @@ func query(dc *libnamed.DConnection, config *configx.Config, byPassCache bool) (
 	if err == nil {
 		logEvent.Str("rcode", dns.RcodeToString[rmsg.Rcode])
 
-		cacheTTL := getMsgTTL(rmsg, &config.Server.Cache)
+		cacheTTL := getMsgTTL(rmsg, &cfg.Server.Cache)
 		if cacheTTL == 0 {
 			// rfc1035#section-4.1.3
 			// zero ttl can be use for DNS rebinding attack, for the sake of security, should cache it short time
