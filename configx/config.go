@@ -1,6 +1,7 @@
 package configx
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -137,9 +138,10 @@ type DOHServer struct {
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
 
-	TlsConfig TlsConfig `json:"tls_config"`
-	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    *DnsOpt   `json:"dns_opt"`
+	TlsConfig  TlsConfig   `json:"tls_config"`
+	Timeout    Timeout     `json:"timeout"`
+	DnsOpt     *DnsOpt     `json:"dns_opt"`
+	SocketAttr *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
 	Client *http.Client `json:"-"`
@@ -478,6 +480,43 @@ func (t *Timeout) parse() error {
 	return nil
 }
 
+func setTCPSocketOpt(conn *net.Conn, socketAttr *SocketAttr) error {
+	if socketAttr == nil {
+		return nil
+	}
+
+	tcpConn, ok := (*conn).(*net.TCPConn)
+	if !ok {
+		return errors.New("invalid TCP socket")
+	}
+	var err error
+	if socketAttr.CloseWithRst {
+		err = tcpConn.SetLinger(0)
+		if err != nil {
+			return err
+		}
+	}
+
+	if socketAttr.KeepAliveInterval > 0 {
+		err = tcpConn.SetKeepAlive(true)
+		if err != nil {
+			return err
+		}
+		err = tcpConn.SetKeepAlivePeriod(time.Duration(socketAttr.KeepAliveInterval) * time.Second)
+		if err != nil {
+			return err
+		}
+	}
+
+	if socketAttr.DisableNoDelay {
+		err = tcpConn.SetNoDelay(false)
+		if err != nil {
+			return err
+		}
+	}
+	return err
+}
+
 func newDnsConnection(client *dns.Client, socketAttr *SocketAttr, addr string, network string) (*dns.Conn, error) {
 	if network == "udp" || socketAttr == nil {
 		return client.Dial(addr)
@@ -487,30 +526,9 @@ func newDnsConnection(client *dns.Client, socketAttr *SocketAttr, addr string, n
 	if err != nil {
 		return nil, err
 	}
-	tcpConn := conn.Conn.(*net.TCPConn)
-	if socketAttr.CloseWithRst {
-		err = tcpConn.SetLinger(0)
-		if err != nil {
-			return conn, err
-		}
-	}
-
-	if socketAttr.KeepAliveInterval > 0 {
-		err = tcpConn.SetKeepAlive(true)
-		if err != nil {
-			return conn, err
-		}
-		err = tcpConn.SetKeepAlivePeriod(time.Duration(socketAttr.KeepAliveInterval) * time.Second)
-		if err != nil {
-			return conn, err
-		}
-	}
-
-	if socketAttr.DisableNoDelay {
-		err = tcpConn.SetNoDelay(false)
-		if err != nil {
-			return conn, err
-		}
+	err = setTCPSocketOpt(&conn.Conn, socketAttr)
+	if err != nil {
+		return conn, err
 	}
 
 	return conn, err
@@ -675,30 +693,30 @@ func (doh *DOHServer) parse() error {
 		}
 	}
 
+	if doh.TlsConfig.ServerName == "" {
+		doh.TlsConfig.ServerName = strings.ToLower(strings.TrimSuffix(host, "."))
+	}
+
 	if net.ParseIP(host) == nil {
 		if _, found := doh.Headers["Host"]; !found {
 			doh.Headers["Host"] = []string{host}
 		}
 
-		if doh.TlsConfig.ServerName == "" {
-			doh.TlsConfig.ServerName = host
-		}
-
 		qname := dns.Fqdn(host)
-		host = ""
+		addr := ""
 		if libnamed.ValidateDomain(qname) {
-			host = lookupIP(qname, doh.ExternalNameServers)
+			addr = lookupIP(qname, doh.ExternalNameServers)
 		}
 
-		if host == "" {
+		if addr == "" {
 			return fmt.Errorf("server '%s' no valid ip address found", doh.Url)
 		}
 
-		if host != "" && portStr != "" {
-			host = net.JoinHostPort(host, portStr)
+		if portStr != "" {
+			urlStruct.Host = net.JoinHostPort(addr, portStr)
+		} else {
+			urlStruct.Host = addr
 		}
-
-		urlStruct.Host = host
 
 		doh.Url = urlStruct.String()
 	}
@@ -717,10 +735,21 @@ func (doh *DOHServer) parse() error {
 			},
 			ForceAttemptHTTP2: true,
 			Proxy:             http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				d := &net.Dialer{
+					Timeout:       doh.Timeout.ConnectDuration, // connect timeout
+					KeepAlive:     65 * time.Second,
+					FallbackDelay: -1, // disable DualStack test
+				}
+				conn, err := d.DialContext(ctx, network, addr)
+				if err == nil {
+					err = setTCPSocketOpt(&conn, doh.SocketAttr)
+					if err != nil {
+						return conn, err
+					}
+				}
+				return conn, err
+			},
 			MaxIdleConns:          10,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -742,7 +771,7 @@ func (dot *DOTServer) parse() error {
 
 	sni := dot.TlsConfig.ServerName
 	if sni == "" {
-		sni = strings.ToLower(strings.TrimRight(host, "."))
+		sni = strings.ToLower(strings.TrimSuffix(host, "."))
 	}
 
 	dot.Timeout.parse()
