@@ -177,7 +177,7 @@ type Timeout struct {
 }
 
 type ConnectionPool struct {
-	IdleTimeout         string        `json:"idle"`
+	IdleTimeout         string        `json:"idleTimeout"`
 	idleTimeoutDuration time.Duration `json:"-"`
 	WaitTimeout         string        `json:"waitTimeout"`
 	waitTimeoutDuration time.Duration `json:"-"`
@@ -506,6 +506,11 @@ func setTCPSocketOpt(conn *net.Conn, socketAttr *SocketAttr) error {
 		if err != nil {
 			return err
 		}
+	} else if socketAttr.KeepAliveInterval < 0 || socketAttr.KeepAliveNum < 0 {
+		err = tcpConn.SetKeepAlive(false)
+		if err != nil {
+			return err
+		}
 	}
 
 	if socketAttr.DisableNoDelay {
@@ -671,7 +676,7 @@ func (dod *DODServer) parse() error {
 				if conn == nil {
 					return false
 				}
-				return !libnamed.ConnClosedByPeer(conn.Conn, 3*time.Millisecond)
+				return !libnamed.ConnClosedByPeer(conn.Conn, 1*time.Millisecond)
 			},
 			CloseConn: func(conn *dns.Conn) error {
 				if conn == nil {
@@ -828,7 +833,7 @@ func (dot *DOTServer) parse() error {
 				if conn == nil {
 					return false
 				}
-				return !libnamed.ConnClosedByPeer(conn.Conn, 3*time.Millisecond)
+				return !libnamed.ConnClosedByPeer(conn.Conn, 1*time.Millisecond)
 			},
 			CloseConn: func(conn *dns.Conn) error {
 				if conn == nil {

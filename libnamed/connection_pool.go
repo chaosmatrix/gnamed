@@ -123,6 +123,9 @@ func (cp *ConnectionPool) Put(conn *dns.Conn) {
 }
 
 func ConnClosedByPeer(conn net.Conn, timeout time.Duration) bool {
+	if timeout < 20*time.Nanosecond {
+		timeout = 50 * time.Nanosecond
+	}
 	err := conn.SetReadDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return true
