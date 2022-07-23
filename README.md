@@ -25,6 +25,9 @@ go build -tags="noquic"
 go build -ldflags '-s -w'
 ```
 
+## Architecture
+![architecture](docs/gnamed.png)
+
 ## Usage
 
 ### Help
