@@ -31,6 +31,15 @@ type OPTOption struct {
 
 }
 
+func SetOpt(r *dns.Msg, o *OPTOption) {
+	if o == nil {
+		return
+	}
+
+	opt := NewOPT(o)
+	r.Extra = append(r.Extra, opt)
+}
+
 func NewOPT(o *OPTOption) (opt *dns.OPT) {
 	opt = new(dns.OPT)
 	opt.Hdr.Name = "."

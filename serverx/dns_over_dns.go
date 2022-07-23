@@ -21,19 +21,17 @@ func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
 	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
 	start := time.Now()
-	defer func() {
-		logEvent.Dur("latency", time.Since(start)).AnErr("server_error", w.Close()).Msg("")
-	}()
 
 	cfg := getGlobalConfig()
 	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
-		logEvent.AnErr("query_error", err)
+		logEvent.Err(err)
 	}
 	if rmsg != nil {
 		err = w.WriteMsg(rmsg)
 		logEvent.AnErr("write_error", err)
 	}
+	logEvent.Dur("latency", time.Since(start)).AnErr("server_error", w.Close()).Msg("")
 }
 
 func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
