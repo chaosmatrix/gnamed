@@ -662,9 +662,31 @@ func (dod *DODServer) parse() error {
 			return err
 		}
 		// only tcp enable connection pool
-		dod.ConnectionPoolTCP = libnamed.NewConnectionPool(dod.Pool.Size, dod.Pool.idleTimeoutDuration, dod.Pool.waitTimeoutDuration, func() (interface{}, error) {
-			return dod.NewConn("tcp")
-		})
+		cpf := &libnamed.ConnectionPool{
+			MaxConn: dod.Pool.Size,
+			NewConn: func() (*dns.Conn, error) {
+				return dod.NewConn("tcp")
+			},
+			IsValidConn: func(conn *dns.Conn) bool {
+				if conn == nil {
+					return false
+				}
+				return !libnamed.ConnClosedByPeer(conn.Conn, 3*time.Millisecond)
+			},
+			CloseConn: func(conn *dns.Conn) error {
+				if conn == nil {
+					return nil
+				}
+				return conn.Close()
+			},
+			IdleTimeout: dod.Pool.idleTimeoutDuration,
+			WaitTimeout: dod.Pool.waitTimeoutDuration,
+		}
+		cpt, err := libnamed.NewConnectionPool(cpf)
+		if err != nil {
+			return err
+		}
+		dod.ConnectionPoolTCP = cpt
 	}
 	return nil
 }
@@ -797,10 +819,31 @@ func (dot *DOTServer) parse() error {
 		if err := dot.Pool.parse(); err != nil {
 			return err
 		}
-
-		dot.ConnectionPool = libnamed.NewConnectionPool(dot.Pool.Size, dot.Pool.idleTimeoutDuration, dot.Pool.waitTimeoutDuration, func() (interface{}, error) {
-			return dot.NewConn(dot.Client.Net)
-		})
+		cpf := &libnamed.ConnectionPool{
+			MaxConn: dot.Pool.Size,
+			NewConn: func() (*dns.Conn, error) {
+				return dot.NewConn("tcp-tls")
+			},
+			IsValidConn: func(conn *dns.Conn) bool {
+				if conn == nil {
+					return false
+				}
+				return !libnamed.ConnClosedByPeer(conn.Conn, 3*time.Millisecond)
+			},
+			CloseConn: func(conn *dns.Conn) error {
+				if conn == nil {
+					return nil
+				}
+				return conn.Close()
+			},
+			IdleTimeout: dot.Pool.idleTimeoutDuration,
+			WaitTimeout: dot.Pool.waitTimeoutDuration,
+		}
+		cpt, err := libnamed.NewConnectionPool(cpf)
+		if err != nil {
+			return err
+		}
+		dot.ConnectionPool = cpt
 	}
 	return nil
 }

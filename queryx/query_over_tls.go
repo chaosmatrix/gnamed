@@ -24,27 +24,23 @@ func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error
 	var rtt time.Duration
 
 	if dot.ConnectionPool != nil {
-		vconn, _rtt, cached, _err := dot.ConnectionPool.Get()
-		conn, _ := vconn.(*dns.Conn)
-		subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).Err(_err)
+		conn, _rtt, cached, _err := dot.ConnectionPool.Get()
+		subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).AnErr("connection_pool_error", _err)
 		if _err == nil {
 			subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&conn)))
 			resp, rtt, err = dot.Client.ExchangeWithConn(r, conn)
-		}
-		if _err != nil || err != nil {
-			if conn != nil {
-				// other side close connection
-				conn.Close() // ignore error
-			}
-			// failed to get connection from pool or conn from pool invalid
-			// retry with new conn
+		} else {
 			conn, err = dot.NewConn(dot.Client.Net)
 			if err == nil {
 				resp, rtt, err = dot.Client.ExchangeWithConn(r, conn)
-				conn.Close()
+			} else {
+				subEvent.Err(err)
 			}
-		} else {
+		}
+		if err == nil {
 			dot.ConnectionPool.Put(conn)
+		} else if conn != nil {
+			conn.Close()
 		}
 	} else {
 		var conn *dns.Conn
