@@ -123,20 +123,37 @@ func (cp *ConnectionPool) Put(conn *dns.Conn) {
 }
 
 func ConnClosedByPeer(conn net.Conn, timeout time.Duration) bool {
-	if timeout < 20*time.Nanosecond {
-		timeout = 50 * time.Nanosecond
+	// preemptive scheduling, goroutines (Psyscall) schedule interval 20000 ns
+	// Psyscall >= 20us
+	// Prunning >= 10ms
+	//
+	// when duration between call SetReadDeadline() and call Read() large than timeout,
+	// Read() will always return error "i/o timeout",
+	// and no way to make sure Read() will exec immedialy after SetReadDeadline()
+	// chain:
+	// src/net/net.go/SetDeadline() -> ... -> src/internal/poll/fd_poll_runtime.go/runtime_pollSetDeadline
+
+	// extream case: cpu resource almost exhaust or cpu resource oversold (increase delay)
+	// extreme case, safe timeout can make sure the Read() will be called instead timeout immedialy: > max(cpu.cfs_period_us - cpu.cfs_quota_us, 10ms)
+	// normally, 50us ~ 1ms would be a suitable value, (use `perf trace -p $PID  -s` to get the reference of your machine and system)
+	if timeout < 50*time.Microsecond {
+		timeout = 50 * time.Microsecond
 	}
+
+	buf := make([]byte, 1)
+
 	err := conn.SetReadDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return true
 	}
 
-	buf := make([]byte, 1)
 	n, err := conn.Read(buf)
 	if err == io.EOF || n != 0 {
 		return true
 	}
 
-	//conn.SetReadDeadline(time.Time{})
+	// don't reset into no deadline
+	// set deadline before read/write is good practice
+	// conn.SetReadDeadline(time.Time{})
 	return false
 }
