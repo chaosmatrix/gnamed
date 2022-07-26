@@ -37,6 +37,7 @@ const (
 	DefaultPoolIdleTimeoutDuration = 30 * time.Second
 	DefaultPoolWaitTimeoutDuration = 3 * time.Second
 	DefaultPoolSize                = 5
+	DefaultPoolQueriesPerConn      = 32
 
 	DefaultDnsOptDnssec       = false
 	DefaultDnsOptEcs          = false
