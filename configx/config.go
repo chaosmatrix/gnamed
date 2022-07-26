@@ -685,7 +685,6 @@ func (dod *DODServer) parse() error {
 				return conn.Close()
 			},
 			IdleTimeout: dod.Pool.idleTimeoutDuration,
-			WaitTimeout: dod.Pool.waitTimeoutDuration,
 		}
 		cpt, err := libnamed.NewConnectionPool(cpf)
 		if err != nil {
@@ -842,7 +841,6 @@ func (dot *DOTServer) parse() error {
 				return conn.Close()
 			},
 			IdleTimeout: dot.Pool.idleTimeoutDuration,
-			WaitTimeout: dot.Pool.waitTimeoutDuration,
 		}
 		cpt, err := libnamed.NewConnectionPool(cpf)
 		if err != nil {

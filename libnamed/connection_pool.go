@@ -1,8 +1,8 @@
 package libnamed
 
 import (
+	"container/list"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -16,110 +16,119 @@ import (
  */
 
 var (
-	errClosedByPeer = errors.New("cache connection closed by peer")
+	defaultMaxReqs = 32
 )
 
 type ConnectionPool struct {
 	MaxConn     int
+	MaxReqs     int
 	NewConn     func() (*dns.Conn, error)  // create new connection
 	IsValidConn func(conn *dns.Conn) bool  // check connection, closed by peer or not
 	CloseConn   func(conn *dns.Conn) error // close connection, release resource
 	lock        sync.Mutex
 	IdleTimeout time.Duration
-	WaitTimeout time.Duration
-	queue       chan *Connection
+	free        *list.List
+	busy        *list.List
 }
 
-type Connection struct {
+type Entry struct {
 	conn      *dns.Conn // use (value).(type) failed to convert interface to given struct, aka. *dns.Conn
+	reqs      int
 	expiredAt int64
 }
 
-var errTimeout error
+type Conn struct {
+	Conn *dns.Conn
+	e    *list.Element // refer into Connection
+}
 
 func NewConnectionPool(cp *ConnectionPool) (*ConnectionPool, error) {
-	errTimeout = fmt.Errorf("wait avaliable connection in connection pool, timeout after %s", cp.WaitTimeout)
 	if cp.NewConn == nil || cp.IsValidConn == nil || cp.CloseConn == nil {
 		return nil, errors.New("connection pool no valid function 'NewConn' || 'IsValidConn' || 'CloseConn'")
 	}
+	maxReqs := cp.MaxReqs
+	if maxReqs <= 0 {
+		maxReqs = defaultMaxReqs
+	}
 	return &ConnectionPool{
 		MaxConn:     cp.MaxConn,
+		MaxReqs:     maxReqs,
 		NewConn:     cp.NewConn,
 		IsValidConn: cp.IsValidConn,
 		CloseConn:   cp.CloseConn,
 		lock:        sync.Mutex{},
 		IdleTimeout: cp.IdleTimeout,
-		WaitTimeout: cp.WaitTimeout,
-		queue:       make(chan *Connection, cp.MaxConn),
+		free:        list.New(),
+		busy:        list.New(),
 	}, nil
 }
 
 // FIFO
 // connection, latency, cached, error
 // Warning: unable to ensure conn is valid (didn't close by other side), caller should create new conn if conn invalid
-func (cp *ConnectionPool) Get() (*dns.Conn, time.Duration, bool, error) {
+func (cp *ConnectionPool) Get() (*Conn, time.Duration, bool, error) {
 	cp.lock.Lock()
 	start := time.Now()
 	nowUnix := start.Unix()
-	var conn *Connection
 
-	freeCnt := len(cp.queue)
-	for i := 0; i < freeCnt; i++ {
-		conn = <-cp.queue
-		if conn.expiredAt > nowUnix {
-			cp.lock.Unlock()
-			// valid connection
-			// TODO: golang hasn't valid way to test connection has been closed by other side
-			// read 0-byte from conn always return nil https://github.com/golang/go/issues/10940#issuecomment-245773886
-			goto checkConn
+	var entry *Entry
+	var err error
+
+	for cp.free.Len() != 0 {
+		e := cp.free.Back()
+		entry = e.Value.(*Entry)
+		cp.free.Remove(e)
+		if entry.expiredAt > nowUnix && entry.reqs < cp.MaxReqs {
+			if !cp.IsValidConn(entry.conn) {
+				// connection closed by peer
+				// FIXME: close connection would be block in some situation
+				cp.CloseConn(entry.conn)
+			} else {
+				break
+			}
 		} else {
-			cp.CloseConn(conn.conn)
+			cp.CloseConn(entry.conn)
 		}
+		entry = nil
 	}
 
-	// create new connection or wait
-	if freeCnt < cp.MaxConn {
-		cp.lock.Unlock()
-		// create new connection
-		c, err := cp.NewConn()
-		if err != nil {
-			return nil, time.Since(start), false, err
-		}
-		return c, time.Since(start), false, nil
-	} else {
-		cp.lock.Unlock()
-		// wait
-		select {
-		case conn = <-cp.queue:
-			// no need to check expired or not
-			// might be closed by peer cause max requests limit
-			goto checkConn
-		case <-time.After(cp.WaitTimeout):
-			return nil, time.Since(start), false, errTimeout
-		}
+	hit := true
+	if entry == nil {
+		entry = &Entry{}
+		entry.conn, err = cp.NewConn()
+		hit = false
 	}
 
-checkConn:
-	if conn == nil {
-		return nil, time.Since(start), false, errors.New("conn: nil pointer")
+	entry.expiredAt = time.Now().Add(cp.IdleTimeout).Unix()
+	entry.reqs++
+
+	var e *list.Element = nil
+	if err == nil {
+		e = cp.busy.PushFront(entry)
 	}
-	if !cp.IsValidConn(conn.conn) {
-		cp.CloseConn(conn.conn)
-		return nil, time.Since(start), false, errClosedByPeer
+
+	c := &Conn{
+		Conn: entry.conn,
+		e:    e,
 	}
-	return conn.conn, time.Since(start), true, nil
+	cp.lock.Unlock()
+	return c, time.Since(start), hit, err
 }
 
-func (cp *ConnectionPool) Put(conn *dns.Conn) {
-	cp.lock.Lock()
-	defer cp.lock.Unlock()
-	if len(cp.queue) >= cp.MaxConn {
+func (cp *ConnectionPool) Put(c *Conn) {
+	if c == nil || c.e == nil {
 		return
 	}
-	cp.queue <- &Connection{
-		conn:      conn,
-		expiredAt: time.Now().Add(cp.IdleTimeout).Unix(),
+	cp.lock.Lock()
+	cp.busy.Remove(c.e)
+	if c.Conn != nil && cp.free.Len() < cp.MaxConn {
+		entry := c.e.Value.(*Entry)
+		if entry.reqs < cp.MaxReqs {
+			entry.expiredAt = time.Now().Add(cp.IdleTimeout).Unix()
+			cp.free.PushFront(entry)
+		}
 	}
+	cp.lock.Unlock()
 }
 
 func ConnClosedByPeer(conn net.Conn, timeout time.Duration) bool {
@@ -127,8 +136,7 @@ func ConnClosedByPeer(conn net.Conn, timeout time.Duration) bool {
 	// Psyscall >= 20us
 	// Prunning >= 10ms
 	//
-	// when duration between call SetReadDeadline() and call Read() large than timeout,
-	// Read() will always return error "i/o timeout",
+	// if Read() execute after ReadDeadline, Read() will return immedialy with error "i/o timeout",
 	// and no way to make sure Read() will exec immedialy after SetReadDeadline()
 	// chain:
 	// src/net/net.go/SetDeadline() -> ... -> src/internal/poll/fd_poll_runtime.go/runtime_pollSetDeadline
@@ -140,6 +148,7 @@ func ConnClosedByPeer(conn net.Conn, timeout time.Duration) bool {
 		timeout = 50 * time.Microsecond
 	}
 
+	// read 0-byte from conn always return nil https://github.com/golang/go/issues/10940#issuecomment-245773886
 	buf := make([]byte, 1)
 
 	err := conn.SetReadDeadline(time.Now().Add(timeout))
