@@ -179,9 +179,8 @@ type Timeout struct {
 type ConnectionPool struct {
 	IdleTimeout         string        `json:"idleTimeout"`
 	idleTimeoutDuration time.Duration `json:"-"`
-	WaitTimeout         string        `json:"waitTimeout"`
-	waitTimeoutDuration time.Duration `json:"-"`
 	Size                int           `json:"size"`
+	QueriesPerConn      int           `json:"queriesPerConn"`
 }
 
 type DnsOpt struct {
@@ -548,6 +547,10 @@ func (cp *ConnectionPool) parse() error {
 		cp.Size = DefaultPoolSize
 	}
 
+	if cp.QueriesPerConn == 0 {
+		cp.QueriesPerConn = DefaultPoolQueriesPerConn
+	}
+
 	if cp.IdleTimeout == "" {
 		cp.idleTimeoutDuration = DefaultPoolIdleTimeoutDuration
 	} else {
@@ -555,16 +558,6 @@ func (cp *ConnectionPool) parse() error {
 			return err
 		} else {
 			cp.idleTimeoutDuration = d
-		}
-	}
-
-	if cp.WaitTimeout == "" {
-		cp.waitTimeoutDuration = DefaultPoolWaitTimeoutDuration
-	} else {
-		if d, err := time.ParseDuration(cp.WaitTimeout); err != nil {
-			return err
-		} else {
-			cp.waitTimeoutDuration = d
 		}
 	}
 
@@ -669,6 +662,7 @@ func (dod *DODServer) parse() error {
 		// only tcp enable connection pool
 		cpf := &libnamed.ConnectionPool{
 			MaxConn: dod.Pool.Size,
+			MaxReqs: dod.Pool.QueriesPerConn,
 			NewConn: func() (*dns.Conn, error) {
 				return dod.NewConn("tcp")
 			},
@@ -825,6 +819,7 @@ func (dot *DOTServer) parse() error {
 		}
 		cpf := &libnamed.ConnectionPool{
 			MaxConn: dot.Pool.Size,
+			MaxReqs: dot.Pool.QueriesPerConn,
 			NewConn: func() (*dns.Conn, error) {
 				return dot.NewConn("tcp-tls")
 			},

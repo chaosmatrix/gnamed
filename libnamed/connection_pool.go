@@ -15,10 +15,6 @@ import (
  * Simple ConnectionPool - FIFO with global lock
  */
 
-var (
-	defaultMaxReqs = 32
-)
-
 type ConnectionPool struct {
 	MaxConn     int
 	MaxReqs     int
@@ -46,13 +42,14 @@ func NewConnectionPool(cp *ConnectionPool) (*ConnectionPool, error) {
 	if cp.NewConn == nil || cp.IsValidConn == nil || cp.CloseConn == nil {
 		return nil, errors.New("connection pool no valid function 'NewConn' || 'IsValidConn' || 'CloseConn'")
 	}
-	maxReqs := cp.MaxReqs
-	if maxReqs <= 0 {
-		maxReqs = defaultMaxReqs
+
+	if cp.MaxConn <= 0 || cp.MaxReqs <= 0 {
+		return nil, nil
 	}
+
 	return &ConnectionPool{
 		MaxConn:     cp.MaxConn,
-		MaxReqs:     maxReqs,
+		MaxReqs:     cp.MaxReqs,
 		NewConn:     cp.NewConn,
 		IsValidConn: cp.IsValidConn,
 		CloseConn:   cp.CloseConn,
