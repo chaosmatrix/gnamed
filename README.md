@@ -21,6 +21,9 @@ go build
 # disable dns-over-quic
 go build -tags="noquic"
 
+# on linux platform, use epoll event to detect closed connection, to disable it, use tag "detect_common"
+go build -tags="detect_common"
+
 # reduce binary size
 go build -ldflags '-s -w'
 ```
