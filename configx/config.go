@@ -496,6 +496,7 @@ func setTCPSocketOpt(conn *net.Conn, socketAttr *SocketAttr) error {
 		}
 	}
 
+	// default golang enable TCP-KeepAlive and use system's parameter
 	if socketAttr.KeepAliveInterval > 0 {
 		err = tcpConn.SetKeepAlive(true)
 		if err != nil {
@@ -666,12 +667,6 @@ func (dod *DODServer) parse() error {
 			NewConn: func() (*dns.Conn, error) {
 				return dod.NewConn("tcp")
 			},
-			IsValidConn: func(conn *dns.Conn) bool {
-				if conn == nil {
-					return false
-				}
-				return !libnamed.ConnClosedByPeer(conn.Conn, 1*time.Millisecond)
-			},
 			CloseConn: func(conn *dns.Conn) error {
 				if conn == nil {
 					return nil
@@ -822,12 +817,6 @@ func (dot *DOTServer) parse() error {
 			MaxReqs: dot.Pool.QueriesPerConn,
 			NewConn: func() (*dns.Conn, error) {
 				return dot.NewConn("tcp-tls")
-			},
-			IsValidConn: func(conn *dns.Conn) bool {
-				if conn == nil {
-					return false
-				}
-				return !libnamed.ConnClosedByPeer(conn.Conn, 1*time.Millisecond)
 			},
 			CloseConn: func(conn *dns.Conn) error {
 				if conn == nil {

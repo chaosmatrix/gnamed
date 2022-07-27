@@ -12,15 +12,16 @@
             {"addr": "[::1]:53", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
-            {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}}
+            {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}}
         ],
         "nameserver": {
             "tag_doh_cf_json_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "GET", "headers": {"content-type": ["application/dns-json"]}, "format": "JSON", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
             "tag_doh_cf_rfc8484_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
-            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://one.one.one.one/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
-            "tag_dns_8": {"protocol": "dns", "dns": {"server": "8.8.8.8:53", "network": "tcp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}, "pool": {"IdleTimeout": "30s", "WaitTimeout": "1s", "Size": 10}}},
+            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
+            "tag_dns_adguard": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "udp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}, "pool": {"idleTimeout": "30s", "Size": 10}}},
+            "tag_dns_adguard_tcp": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "tcp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}, "pool": {"idleTimeout": "900s", "Size": 10, "queriesPerConn": 5}, "socketAttr": {"keepAliveInterval": 0, "disableNoDelay": false, "CloseWithRst": false}}},
             "tag_dot_cf": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
-            "tag_dot_cf_one": {"protocol": "tls-tcp", "dot": {"server": "one.one.one.one:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
+            "tag_dot_cf_one": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
             "tag_doq_adguard_filter_01": {"protocol": "quic", "doq": {"server": "94.140.15.15:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
             "tag_doq_adguard_unfiltered_01": {"protocol": "quic", "doq": {"server": "94.140.14.140:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {}}},
             "tag_doh_adguard_filter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.15.15/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
@@ -29,7 +30,9 @@
             "tag_grpc": {"protocol": "grpc", "grpc": {"timeout": {}, "dns_opt": {}}}
         },
         "view": {
-            ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_8"},
+            ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard"},
+            "www.bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard"},
+            "bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard_tcp"},
             "twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_json_01"},
             "www.twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf"},
             "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."},
@@ -47,7 +50,8 @@
             "minTTL": 60,
             "maxTTL": 60,
             "backGroundUpdate": true,
-            "beforeExpiredSecond": 30,
+            "beforeExpiredSecond": 0,
+            "beforeExpiredPercent": 0.1,
             "useSteal": true
         }
     },
