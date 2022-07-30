@@ -194,6 +194,7 @@ type View struct {
 	ResolveType   string `json:"resolve_type"`
 	NameServerTag string `json:"nameserver_tag"`
 	Cname         string `json:"cname"`
+	VerifyDnssec  bool   `json:"verifyDnssec"`
 }
 
 // Server -> Hosts
