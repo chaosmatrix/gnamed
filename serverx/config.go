@@ -6,16 +6,20 @@ import (
 	"time"
 )
 
-var globalServerConfig *serverConfig
+var defaultServerConfig *serverConfig
 
 type serverConfig struct {
-	configs []*configx.Config
-	currId  int
-	lock    sync.Mutex // protect concurrency update
+	cfg  *configx.Config
+	lock sync.Mutex // protect concurrency update
 }
 
+func initDefaultServerConfig(cfg *configx.Config) {
+	defaultServerConfig = &serverConfig{
+		cfg: cfg,
+	}
+}
 func getGlobalConfig() *configx.Config {
-	return globalServerConfig.configs[globalServerConfig.currId]
+	return defaultServerConfig.cfg
 }
 
 func updateGlobalConfig() (*configx.Config, error) {
@@ -25,22 +29,16 @@ func updateGlobalConfig() (*configx.Config, error) {
 		time.Sleep(3 * time.Second)
 	}
 
-	globalServerConfig.lock.Lock()
-	defer globalServerConfig.lock.Unlock()
-	idx := globalServerConfig.currId ^ 1
-	fname := globalServerConfig.configs[globalServerConfig.currId].GetFileName()
+	defaultServerConfig.lock.Lock()
+	defer defaultServerConfig.lock.Unlock()
+	fname := defaultServerConfig.cfg.GetFileName()
 	cfg, err := configx.ParseConfig(fname)
 	if err != nil {
 		return cfg, err
 	}
 
-	// create new pointer point to new value
-	// rather than update original pointer's value
-	// not affect exist value
-	globalServerConfig.configs[idx] = cfg
-
-	// make sure currId updated after configuration updated, so that lock-free for read
-	globalServerConfig.currId = idx
+	// update pointer rather than update pointer's value, to achive lock-free
+	defaultServerConfig.cfg = cfg
 
 	return cfg, err
 }

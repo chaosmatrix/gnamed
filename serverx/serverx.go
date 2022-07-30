@@ -61,17 +61,10 @@ func (srv *ServerMux) waitShutdownSignal() {
 }
 
 func (srv *ServerMux) Serve(config *configx.Config, wg *sync.WaitGroup) {
-	sc := &serverConfig{
-		configs: make([]*configx.Config, 2),
-		currId:  0,
-		lock:    sync.Mutex{},
-	}
-	sc.configs[sc.currId] = config
 
-	globalServerConfig = sc
-
+	initDefaultServerConfig(config)
 	// init golbal
-	cfg := config
+	cfg := getGlobalConfig()
 
 	sls := cfg.Server.Listen
 
