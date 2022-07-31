@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"gnamed/queryx"
+	"net"
 	"sync"
 	"time"
 
@@ -148,6 +150,14 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConne
 func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func(addr string, network string) {
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			_ip := net.ParseIP(host)
+			if _ip != nil && _ip.IsUnspecified() {
+				err := errors.New("listen on unspecified address, packet receive and send address might be different")
+				libnamed.Logger.Warn().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err).Msg("")
+			}
+		}
+
 		cert, err := tls.LoadX509KeyPair(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
 		if err != nil {
 			panic(err)
