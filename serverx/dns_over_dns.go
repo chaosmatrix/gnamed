@@ -1,9 +1,11 @@
 package serverx
 
 import (
+	"errors"
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,9 +39,15 @@ func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
 func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func(addr string, network string) {
-		// TODO: handle error
-		//err := serveDoDFunc(&listen, handleDoDRequest)
-
+		if strings.HasPrefix(network, "udp") {
+			if host, _, err := net.SplitHostPort(listen.Addr); err == nil {
+				_ip := net.ParseIP(host)
+				if _ip != nil && _ip.IsUnspecified() {
+					err := errors.New("listen on unspecified address, packet receive and send address might be different")
+					libnamed.Logger.Warn().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err).Msg("")
+				}
+			}
+		}
 		dos := &dns.Server{
 			Addr:          listen.Addr,
 			Net:           listen.Network,

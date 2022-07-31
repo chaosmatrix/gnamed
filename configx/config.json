@@ -12,7 +12,14 @@
             {"addr": "[::1]:53", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
-            {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}}
+            {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}},
+            {"addr": "0.0.0.0:3053", "network": "tcp", "protocol": "dns"},
+            {"addr": "0.0.0.0:3053", "network": "udp", "protocol": "dns"},
+            {"addr": "[::]:3053", "network": "tcp6", "protocol": "dns"},
+            {"addr": "[::]:3053", "network": "udp6", "protocol": "dns"},
+            {"addr": "0.0.0.0:30443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
+            {"addr": "0.0.0.0:30853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
+            {"addr": "0.0.0.0:30784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}}
         ],
         "nameserver": {
             "tag_doh_cf_json_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "GET", "headers": {"content-type": ["application/dns-json"]}, "format": "JSON", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "dns_opt": {"dnssec": false, "ecs": false, "randomDomain": true}}},
