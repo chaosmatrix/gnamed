@@ -43,7 +43,6 @@ type Config struct {
 	Server             Server              `json:"server"`
 	Query              Query               `json:"query"`
 	Admin              Admin               `json:"admin"`
-	Files              Files               `json:"files"`
 }
 
 type Server struct {
@@ -194,7 +193,13 @@ type View struct {
 	ResolveType   string `json:"resolve_type"`
 	NameServerTag string `json:"nameserver_tag"`
 	Cname         string `json:"cname"`
-	VerifyDnssec  bool   `json:"verifyDnssec"`
+	Dnssec        bool   `json:"dnssec"`
+	SubNet        string `json:"subnet"`
+
+	// internal: edns-client-subnet
+	EcsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
+	EcsAddress net.IP `json:"-"`
+	EcsNetMask uint8  `json:"-"`
 }
 
 // Server -> Hosts
@@ -249,11 +254,6 @@ type Auth struct {
 	Token map[string]string `json:"token"` // user:token
 }
 
-// Files
-type Files struct {
-	EcsIpList string
-}
-
 func ParseConfig(fname string) (*Config, error) {
 	return parseConfig(fname)
 }
@@ -287,9 +287,10 @@ func parseConfig(fname string) (*Config, error) {
 		return cfg, fmt.Errorf("default view \".\" not exist")
 	}
 	for vk, vv := range cfg.Server.View {
-		if vv.Cname != "" {
-			vv.Cname = dns.Fqdn(vv.Cname)
+		if err = (&vv).parse(); err != nil {
+			return cfg, err
 		}
+
 		vkFqdn := dns.Fqdn(vk)
 		if vkFqdn != vk {
 			delete(cfg.Server.View, vk)
@@ -349,6 +350,47 @@ func (cfg *Config) GetFileName() string {
 
 func (cfg *Config) GetTimestamp() time.Time {
 	return cfg.timestamp
+}
+
+func (v *View) parse() error {
+
+	if v.Cname != "" {
+		v.Cname = dns.Fqdn(v.Cname)
+	}
+
+	if v.SubNet != "" {
+		ipAddr, ipNet, err := net.ParseCIDR(v.SubNet)
+		if err != nil {
+			ipAddr = net.ParseIP(v.SubNet)
+			if ipAddr == nil {
+				return fmt.Errorf("invalid subNet \"%s\"", v.SubNet)
+			}
+		}
+		if ipNet == nil {
+			subNet := ""
+			if ipAddr.To4() != nil {
+				subNet = v.SubNet + "/32"
+			} else {
+				subNet = v.SubNet + "/128"
+			}
+			_, ipNet, err = net.ParseCIDR(subNet)
+			if err != nil {
+				return err
+			}
+		}
+
+		ones, bits := ipNet.Mask.Size()
+		if bits == net.IPv4len*8 {
+			v.EcsAddress = ipNet.IP.To4()
+			v.EcsFamily = DefaultEcsFamilyIPv4
+		} else {
+			v.EcsAddress = ipNet.IP.To16()
+			v.EcsFamily = DefaultEcsFamilyIPv6
+		}
+		v.EcsNetMask = uint8(ones)
+	}
+
+	return nil
 }
 
 func (c *Cache) parse() error {
@@ -433,19 +475,22 @@ func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.G
 			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
 		}
 		cfg.lock.Unlock()
-	} else {
-		if cfg.singleflightGroups[qclass][qtype] == nil {
-			// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
-			// make sure value only inittialize once
-			// make sure waiting concurrency caller get valid and correct value
-			cfg.lock.Lock()
-			if cfg.singleflightGroups[qclass][qtype] == nil {
-				// double check
-				cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
-			}
-			cfg.lock.Unlock()
-		}
 	}
+
+	// if more than two caller with same qclass, but different qtype, only one qclass&qtype will be initialize,
+	// so, need to check again to make sure all qclass&qtype has been initiallized.
+	if cfg.singleflightGroups[qclass][qtype] == nil {
+		// need to make sure len(cfg.singleflightGroups) different values need to init once, so sync.Once not a good choice.
+		// make sure value only inittialize once
+		// make sure waiting concurrency caller get valid and correct value
+		cfg.lock.Lock()
+		if cfg.singleflightGroups[qclass][qtype] == nil {
+			// double check
+			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
+		}
+		cfg.lock.Unlock()
+	}
+
 	return cfg.singleflightGroups[qclass][qtype]
 }
 
@@ -571,6 +616,7 @@ func (srv *Server) parse() error {
 
 	// verify using nameserverTag valid
 	for zone, vi := range srv.View {
+
 		if ns, found := srv.NameServer[vi.NameServerTag]; !found {
 			fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", zone, vi.NameServerTag)
 			res = false
