@@ -47,6 +47,11 @@ const (
 	DefaultCacheTtl          = 60 * time.Second
 	DefaultCacheScanInterval = 10 * time.Second
 
+	// edns-client-subnet
+	DefaultEcsFamilyIPv4 uint16 = 1
+	DefaultEcsFamilyIPv6 uint16 = 2
+	DefaultEcsAddress           = ""
+
 	MaxCnameCounts = 5
 )
 
