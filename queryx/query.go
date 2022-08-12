@@ -187,6 +187,22 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	if oId == 0 {
 		dc.IncomingMsg.Id = dns.Id() // make sure incoming msg id not zero
 	}
+
+	// send dnssec query to server that don't support dnssec, might be response with FORMERR
+	view, found := cfg.Server.View[vname]
+	if found && (view.Dnssec || view.SubNet != "") {
+		opt := &libnamed.OPTOption{
+			EnableDNSSEC:  view.Dnssec,
+			EnableECS:     view.SubNet != "",
+			SourceIP:      view.EcsAddress,
+			Family:        view.EcsFamily,
+			SourceNetmask: view.EcsNetMask,
+			SourceScope:   view.EcsNetMask,
+			UDPSize:       1024,
+		}
+		libnamed.SetOpt(r, opt)
+	}
+
 	queryStartTime := time.Now()
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:
@@ -205,6 +221,15 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	dc.IncomingMsg.Id = oId
 	if rmsg != nil {
 		rmsg.Id = oId
+	}
+
+	if view.Dnssec {
+		// dnssec unsupported on upstream server
+		logEvent.Bool("dnssec", rmsg.IsEdns0() == nil || rmsg.IsEdns0().Do())
+		logEvent.Str("signature_verify", "TODO")
+		// TODO: verify RRSIG, if rmsg.IsEdns0().Do() == true
+		// 1. get domain's DNSKEY: query domain with TypeDNSKEY
+		// 2. verify RRSIG with DNSKEY: func (rr *RRSIG) Verify(k *DNSKEY, rrset []RR) error
 	}
 
 	// 4. cache response
