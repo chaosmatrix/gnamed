@@ -29,7 +29,7 @@ type DOQServer struct {
 
 // FIXME: dot.Server was a config file, should not be change.
 func (doq *DOQServer) parse() error {
-	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, DefaultPortDoQ)
+	server, host, err := parseServer(doq.Server, doq.ExternalNameServers, defaultPortDoQ)
 	if err != nil {
 		return err
 	}

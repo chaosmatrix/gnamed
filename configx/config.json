@@ -37,11 +37,11 @@
             "tag_grpc": {"protocol": "grpc", "grpc": {"timeout": {}, "dns_opt": {}}}
         },
         "view": {
-            ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard", "dnssec": false, "subNet": ""},
-            "www.bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard"},
+            ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard", "dnssec": false, "subnet": "", "rr_https": {"alpn": ["h3", "h2", "http/1.1"]}},
+            "www.bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard", "rr_https": {"priority": 0, "target": "https.svc.bing.com"}},
             "bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard_tcp"},
-            "twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_json_01", "dnssec": false, "subNet": "1.2.3.4/24"},
-            "www.twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf", "dnssec": false, "subNet": "fe80::215:5dff:fed7:cbfa/64"},
+            "twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_json_01", "dnssec": false, "subnet": "1.2.3.4/24"},
+            "www.twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf", "dnssec": false, "subnet": "fe80::215:5dff:fed7:cbfa/64"},
             "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."},
             "www.github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01_one"},
             "github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf_one"},

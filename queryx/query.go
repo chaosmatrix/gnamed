@@ -190,10 +190,10 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 
 	// send dnssec query to server that don't support dnssec, might be response with FORMERR
 	view, found := cfg.Server.View[vname]
-	if found && (view.Dnssec || view.SubNet != "") {
+	if found && (view.Dnssec || view.Subnet != "") {
 		opt := &libnamed.OPTOption{
 			EnableDNSSEC:  view.Dnssec,
-			EnableECS:     view.SubNet != "",
+			EnableECS:     view.Subnet != "",
 			SourceIP:      view.EcsAddress,
 			Family:        view.EcsFamily,
 			SourceNetmask: view.EcsNetMask,
@@ -221,6 +221,11 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	dc.IncomingMsg.Id = oId
 	if rmsg != nil {
 		rmsg.Id = oId
+	}
+
+	if view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
+		logEvent.Bool("intercept_with_fake", true)
+		rmsg, err = queryInterceptHTTPS(r, nil, &view)
 	}
 
 	if view.Dnssec {
@@ -256,6 +261,19 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	// 5. update reply msg
 	setReply(rmsg, r, qname)
 	return rmsg, err
+}
+
+func rrExist(m *dns.Msg, qtype uint16) bool {
+	if m == nil || m.Answer == nil || len(m.Answer) == 0 {
+		return false
+	}
+
+	for _, ans := range m.Answer {
+		if ans.Header().Rrtype == qtype {
+			return true
+		}
+	}
+	return false
 }
 
 // FIXME: public function should not here
