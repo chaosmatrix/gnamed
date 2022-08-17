@@ -223,7 +223,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		rmsg.Id = oId
 	}
 
-	if view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
+	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
 		logEvent.Bool("intercept_with_fake", true)
 		rmsg, err = queryInterceptHTTPS(r, nil, &view)
 	}

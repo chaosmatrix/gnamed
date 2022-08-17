@@ -196,8 +196,6 @@ type View struct {
 	Dnssec        bool   `json:"dnssec"`
 	Subnet        string `json:"subnet"`
 
-	// force generate HTTPS RR from A/AA record, usefull or not, depend on browser/libs supported,
-	// for example: chrome://flags/#dns-https-svcb
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	RrHTTPS *RrHTTPS `json:"rr_https"`
 
