@@ -194,7 +194,10 @@ type View struct {
 	NameServerTag string `json:"nameserver_tag"`
 	Cname         string `json:"cname"`
 	Dnssec        bool   `json:"dnssec"`
-	SubNet        string `json:"subnet"`
+	Subnet        string `json:"subnet"`
+
+	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
+	RrHTTPS *RrHTTPS `json:"rr_https"`
 
 	// internal: edns-client-subnet
 	EcsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
@@ -202,12 +205,18 @@ type View struct {
 	EcsNetMask uint8  `json:"-"`
 }
 
+// HTTPS RRSet setting
+type RrHTTPS struct {
+	Priority uint16   `json:"priority"`
+	Target   string   `json:"target"`
+	Alpn     []string `json:"alpn"`
+}
+
 // Server -> Hosts
 type Host struct {
-	Name     string `json:"name"`
-	Record   string `json:"record"`
-	Qtype    string `json:"qtype"`
-	Wildcard bool   `json:"wildcard"`
+	Name   string `json:"name"`
+	Record string `json:"record"`
+	Qtype  string `json:"qtype"`
 }
 
 // Server -> Cache
@@ -358,20 +367,20 @@ func (v *View) parse() error {
 		v.Cname = dns.Fqdn(v.Cname)
 	}
 
-	if v.SubNet != "" {
-		ipAddr, ipNet, err := net.ParseCIDR(v.SubNet)
+	if v.Subnet != "" {
+		ipAddr, ipNet, err := net.ParseCIDR(v.Subnet)
 		if err != nil {
-			ipAddr = net.ParseIP(v.SubNet)
+			ipAddr = net.ParseIP(v.Subnet)
 			if ipAddr == nil {
-				return fmt.Errorf("invalid subNet \"%s\"", v.SubNet)
+				return fmt.Errorf("invalid subNet \"%s\"", v.Subnet)
 			}
 		}
 		if ipNet == nil {
 			subNet := ""
 			if ipAddr.To4() != nil {
-				subNet = v.SubNet + "/32"
+				subNet = v.Subnet + "/32"
 			} else {
-				subNet = v.SubNet + "/128"
+				subNet = v.Subnet + "/128"
 			}
 			_, ipNet, err = net.ParseCIDR(subNet)
 			if err != nil {
@@ -382,12 +391,27 @@ func (v *View) parse() error {
 		ones, bits := ipNet.Mask.Size()
 		if bits == net.IPv4len*8 {
 			v.EcsAddress = ipNet.IP.To4()
-			v.EcsFamily = DefaultEcsFamilyIPv4
+			v.EcsFamily = defaultEcsFamilyIPv4
 		} else {
 			v.EcsAddress = ipNet.IP.To16()
-			v.EcsFamily = DefaultEcsFamilyIPv6
+			v.EcsFamily = defaultEcsFamilyIPv6
 		}
 		v.EcsNetMask = uint8(ones)
+	}
+
+	// RrHTTPS
+	if v.RrHTTPS != nil {
+		// priority == 0 is AliasMode
+		// default not AliasMode
+		if len(v.RrHTTPS.Alpn) > 0 && v.RrHTTPS.Priority <= 0 {
+			v.RrHTTPS.Priority = 1
+		}
+
+		if v.RrHTTPS.Priority != 0 && len(v.RrHTTPS.Alpn) == 0 {
+			v.RrHTTPS.Alpn = defaultRrHTTPSAlpn
+		}
+
+		v.RrHTTPS.Target = dns.Fqdn(v.RrHTTPS.Target)
 	}
 
 	return nil
@@ -517,10 +541,10 @@ func (t *Timeout) parse() error {
 		}
 	}
 
-	setDuration(&t.IdleDuration, t.Idle, DefaultTimeoutDurationIdle)
-	setDuration(&t.ConnectDuration, t.Connect, DefaultTimeoutDurationConnect)
-	setDuration(&t.ReadDuration, t.Read, DefaultTimeoutDurationRead)
-	setDuration(&t.WriteDuration, t.Write, DefaultTimeoutDurationWrite)
+	setDuration(&t.IdleDuration, t.Idle, defaultTimeoutDurationIdle)
+	setDuration(&t.ConnectDuration, t.Connect, defaultTimeoutDurationConnect)
+	setDuration(&t.ReadDuration, t.Read, defaultTimeoutDurationRead)
+	setDuration(&t.WriteDuration, t.Write, defaultTimeoutDurationWrite)
 
 	return nil
 }
@@ -591,15 +615,15 @@ func (cp *ConnectionPool) parse() error {
 	}
 
 	if cp.Size == 0 {
-		cp.Size = DefaultPoolSize
+		cp.Size = defaultPoolSize
 	}
 
 	if cp.QueriesPerConn == 0 {
-		cp.QueriesPerConn = DefaultPoolQueriesPerConn
+		cp.QueriesPerConn = defaultPoolQueriesPerConn
 	}
 
 	if cp.IdleTimeout == "" {
-		cp.idleTimeoutDuration = DefaultPoolIdleTimeoutDuration
+		cp.idleTimeoutDuration = defaultPoolIdleTimeoutDuration
 	} else {
 		if d, err := time.ParseDuration(cp.IdleTimeout); err != nil {
 			return err
@@ -656,7 +680,7 @@ func (dod *DODServer) parse() error {
 	host, portStr, err := net.SplitHostPort(dod.Server)
 	if err != nil {
 		host = dod.Server
-		dod.Server = net.JoinHostPort(dod.Server, strconv.Itoa(DefaultPortDns))
+		dod.Server = net.JoinHostPort(dod.Server, strconv.Itoa(defaultPortDns))
 	} else {
 		if port, err := strconv.Atoi(portStr); err != nil || port < 0 || port > 65535 {
 			return errInvalidServer
@@ -825,7 +849,7 @@ func (doh *DOHServer) parse() error {
 
 // FIXME: dot.Server was a config file, should not be change.
 func (dot *DOTServer) parse() error {
-	server, host, err := parseServer(dot.Server, dot.ExternalNameServers, DefaultPortDoT)
+	server, host, err := parseServer(dot.Server, dot.ExternalNameServers, defaultPortDoT)
 	if err != nil {
 		return err
 	}
@@ -971,7 +995,7 @@ func contructQueryList(qm map[string]QueryList) {
 // return (cname, vname), if cname exist, else name
 func (srv *Server) FindRealName(name string) (string, string) {
 	idx := 0
-	for i := 0; i < MaxCnameCounts; i++ {
+	for i := 0; i < maxCnameCounts; i++ {
 		if vi, found := srv.View[name[idx:]]; found {
 			if len(vi.Cname) != 0 && name != vi.Cname {
 				name = vi.Cname
