@@ -60,8 +60,10 @@ type Main struct {
 	// tcp:127.0.0.1:12345
 	// udp:127.0.0.1:12345
 	// unix:/path/syslog.socket
-	LogFile  string `json:"logFile"`
-	LogLevel string `json:"logLevel"`
+	LogFile          string        `json:"logFile"`
+	LogLevel         string        `json:"logLevel"`
+	ShutdownTimeout  string        `json:"shutdown_timeout"`
+	ShutdownDuration time.Duration `json:"-"`
 
 	Singleflight bool `json:"singleflight"`
 }
@@ -108,7 +110,6 @@ type DODServer struct {
 	Network string `json:"network"`
 
 	Timeout    Timeout         `json:"timeout"`
-	DnsOpt     *DnsOpt         `json:"dns_opt"`
 	Pool       *ConnectionPool `json:"pool"`
 	SocketAttr *SocketAttr     `json:"socketAttr,omitempty"`
 
@@ -139,7 +140,6 @@ type DOHServer struct {
 
 	TlsConfig  TlsConfig   `json:"tls_config"`
 	Timeout    Timeout     `json:"timeout"`
-	DnsOpt     *DnsOpt     `json:"dns_opt"`
 	SocketAttr *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
@@ -155,7 +155,6 @@ type DOTServer struct {
 
 	TlsConfig  TlsConfig   `json:"tls_config"`
 	Timeout    Timeout     `json:"timeout"`
-	DnsOpt     *DnsOpt     `json:"dns_opt"`
 	SocketAttr *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
@@ -182,12 +181,6 @@ type ConnectionPool struct {
 	QueriesPerConn      int           `json:"queriesPerConn"`
 }
 
-type DnsOpt struct {
-	Dnssec       bool `json:"dnssec"`       // enable dnssec
-	Ecs          bool `json:"ecs"`          // enable edns-client-subnet
-	RandomDomain bool `json:"randomDomain"` // randomw Upper/Lower domain's chars
-}
-
 // Server -> View
 type View struct {
 	ResolveType   string `json:"resolve_type"`
@@ -195,6 +188,7 @@ type View struct {
 	Cname         string `json:"cname"`
 	Dnssec        bool   `json:"dnssec"`
 	Subnet        string `json:"subnet"`
+	RandomDomain  bool   `json:"randomDomain"` // randomw Upper/Lower domain's chars
 
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	RrHTTPS *RrHTTPS `json:"rr_https"`
@@ -521,6 +515,15 @@ func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.G
 func (mf *Main) parse() error {
 	if mf.LogLevel == "" {
 		mf.LogLevel = zerolog.DebugLevel.String()
+	}
+	if mf.ShutdownTimeout == "" {
+		mf.ShutdownDuration = 60 * time.Second
+	} else {
+		if t, err := time.ParseDuration(mf.ShutdownTimeout); err == nil {
+			mf.ShutdownDuration = t
+		} else {
+			return err
+		}
 	}
 	return nil
 }

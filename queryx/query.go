@@ -6,7 +6,9 @@ import (
 	"gnamed/cachex"
 	"gnamed/configx"
 	"gnamed/libnamed"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -225,7 +227,8 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 
 	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
 		logEvent.Bool("intercept_with_fake", true)
-		rmsg, err = queryInterceptHTTPS(r, nil, &view)
+		ips := fetchIP(r, cfg)
+		rmsg, err = queryInterceptHTTPS(r, ips, &view)
 	}
 
 	if view.Dnssec {
@@ -263,6 +266,69 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	return rmsg, err
 }
 
+func fetchIP(r *dns.Msg, cfg *configx.Config) []net.IP {
+
+	res := make([][]net.IP, 2)
+	var wg sync.WaitGroup
+
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		wg.Add(1)
+		go func(qtype uint16) {
+			m := r.Copy()
+			m.Question[0].Qtype = qtype
+
+			logEvent := libnamed.Logger.Trace().Str("op_type", "op_https_sub")
+			dc := &libnamed.DConnection{
+				IncomingMsg: m,
+				Log:         logEvent,
+			}
+			resp, err := Query(dc, cfg)
+			if err == nil {
+				ans := rrFetchIP(resp)
+				if qtype == dns.TypeA {
+					res[0] = ans
+				} else if qtype == dns.TypeAAAA {
+					res[1] = ans
+				}
+			}
+			logEvent.Err(err).Msg("")
+			wg.Done()
+		}(qtype)
+	}
+
+	wg.Wait()
+
+	if len(res[0]) == 0 {
+		return res[1]
+	} else if len(res[1]) == 0 {
+		return res[0]
+	} else {
+		res[0] = append(res[0], res[1]...)
+		res[1] = []net.IP{}
+		return res[0]
+	}
+}
+
+func rrFetchIP(m *dns.Msg) []net.IP {
+	res := []net.IP{}
+
+	if m != nil && m.Answer != nil {
+		for _, ans := range m.Answer {
+			rtype := ans.Header().Rrtype
+			if rtype == dns.TypeA {
+				if a, ok := ans.(*dns.A); ok {
+					res = append(res, a.A.To4())
+				}
+			} else if rtype == dns.TypeAAAA {
+				if aaaa, ok := ans.(*dns.AAAA); ok {
+					res = append(res, aaaa.AAAA.To16())
+				}
+			}
+		}
+	}
+
+	return res
+}
 func rrExist(m *dns.Msg, qtype uint16) bool {
 	if m == nil || m.Answer == nil || len(m.Answer) == 0 {
 		return false

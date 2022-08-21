@@ -5,6 +5,8 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"sync"
+
+	"golang.org/x/net/context"
 )
 
 var (
@@ -36,21 +38,29 @@ func (srv *ServerMux) registerOnShutdown(f func()) {
 }
 
 func (srv *ServerMux) Reload() error {
-	logEvent := libnamed.Logger.Debug().Str("log_type", "server")
 	_, err := updateGlobalConfig()
-	logEvent.Err(err).Msg("reload config")
 	return err
 }
 
-func (srv *ServerMux) Shutdown() error {
+func (srv *ServerMux) Shutdown(ctx context.Context) error {
 	srv.shutdownChan <- struct{}{}
 
-	srv.lock.Lock()
-	for i := range srv.shutdowns {
-		srv.shutdowns[i]()
+	finishCh := make(chan struct{})
+	go func() {
+		srv.lock.Lock()
+		for i := range srv.shutdowns {
+			srv.shutdowns[i]()
+		}
+		srv.lock.Unlock()
+		finishCh <- struct{}{}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-finishCh:
+		return nil
 	}
-	srv.lock.Unlock()
-	return nil
 }
 
 // block until receive shutdown signal

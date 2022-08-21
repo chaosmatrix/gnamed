@@ -36,18 +36,24 @@ func queryInterceptHTTPS(r *dns.Msg, hints []net.IP, view *configx.View) (*dns.M
 			h.Value = append(h.Value, e)
 		}
 
+		ipv4hint := new(dns.SVCBIPv4Hint)
+		ipv6hint := new(dns.SVCBIPv6Hint)
 		for _, ip := range hints {
 			ipv4 := ip.To4()
 			if ipv4 != nil {
-				ipv4hint := new(dns.SVCBIPv4Hint)
-				ipv4hint.Hint = []net.IP{ipv4}
-				h.Value = append(h.Value, ipv4hint)
+				ipv4hint.Hint = append(ipv4hint.Hint, ipv4)
 			} else {
-				ipv6hint := new(dns.SVCBIPv6Hint)
-				ipv6hint.Hint = []net.IP{ip}
-				h.Value = append(h.Value, ipv6hint)
+				ipv6hint.Hint = append(ipv6hint.Hint, ip)
 			}
 		}
+
+		if len(ipv4hint.Hint) > 0 {
+			h.Value = append(h.Value, ipv4hint)
+		}
+		if len(ipv6hint.Hint) > 0 {
+			h.Value = append(h.Value, ipv6hint)
+		}
+
 	}
 
 	rmsg.Answer = []dns.RR{h}
