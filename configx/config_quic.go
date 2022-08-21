@@ -20,7 +20,6 @@ type DOQServer struct {
 
 	TlsConfig TlsConfig `json:"tls_config"`
 	Timeout   Timeout   `json:"timeout"`
-	DnsOpt    *DnsOpt   `json:"dns_opt"`
 
 	// use internal
 	TlsConf  *tls.Config  `json:"-"`

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"gnamed/cachex"
@@ -72,11 +73,24 @@ func main() {
 		sg := <-signalChan
 		logEvent := libnamed.Logger.Debug().Str("log_type", "main").Str("signal", sg.String())
 		if sg == syscall.SIGHUP {
-			logEvent.Msg("server start reload configuration")
-			srv.Reload()
+			logEvent.Str("op_type", "reload")
+			if err = srv.Reload(); err != nil {
+				logEvent.Err(err)
+				logEvent.Msg("server reload configuration, failed")
+			} else {
+				logEvent.Msg("server reload configuration, successful")
+			}
 		} else {
-			logEvent.Msg("server start shutdown")
-			srv.Shutdown()
+			logEvent.Str("op_type", "shutdown")
+			ctx, cancel := context.WithTimeout(context.TODO(), cfg.Server.Main.ShutdownDuration)
+			if err = srv.Shutdown(ctx); err != nil {
+				logEvent.Err(err)
+				logEvent.Msg("server shutdown timeout, force quit")
+				os.Exit(1)
+			} else {
+				logEvent.Msg("server shutdown completely")
+			}
+			cancel()
 			break
 		}
 	}
