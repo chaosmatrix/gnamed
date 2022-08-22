@@ -205,6 +205,11 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		libnamed.SetOpt(r, opt)
 	}
 
+	// randomw Upper/Lower domain's chars
+	if view.RandomDomain {
+		dc.IncomingMsg.Question[0].Name = libnamed.RandomUpperDomain(dc.IncomingMsg.Question[0].Name)
+	}
+
 	queryStartTime := time.Now()
 	switch nameserver.Protocol {
 	case configx.ProtocolTypeDNS:

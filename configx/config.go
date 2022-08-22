@@ -188,7 +188,9 @@ type View struct {
 	Cname         string `json:"cname"`
 	Dnssec        bool   `json:"dnssec"`
 	Subnet        string `json:"subnet"`
-	RandomDomain  bool   `json:"random_domain"` // randomw Upper/Lower domain's chars
+
+	// sometimes can be used to prevent dns hijacking when using dns-over-plain-udp protocol
+	RandomDomain bool `json:"random_domain"` // randomw Upper/Lower domain's chars
 
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
