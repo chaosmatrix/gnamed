@@ -225,7 +225,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		rmsg.Id = oId
 	}
 
-	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
+	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && (view.RrHTTPS.Replace || !rrExist(rmsg, r.Question[0].Qtype)) {
 		logEvent.Bool("intercept_with_fake", true)
 		ips := fetchIP(r, cfg)
 		rmsg, err = queryInterceptHTTPS(r, ips, &view)
@@ -263,6 +263,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 
 	// 5. update reply msg
 	setReply(rmsg, r, qname)
+
 	return rmsg, err
 }
 

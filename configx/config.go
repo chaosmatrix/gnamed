@@ -188,9 +188,10 @@ type View struct {
 	Cname         string `json:"cname"`
 	Dnssec        bool   `json:"dnssec"`
 	Subnet        string `json:"subnet"`
-	RandomDomain  bool   `json:"randomDomain"` // randomw Upper/Lower domain's chars
+	RandomDomain  bool   `json:"random_domain"` // randomw Upper/Lower domain's chars
 
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
+	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
 	RrHTTPS *RrHTTPS `json:"rr_https"`
 
 	// internal: edns-client-subnet
@@ -204,6 +205,7 @@ type RrHTTPS struct {
 	Priority uint16   `json:"priority"`
 	Target   string   `json:"target"`
 	Alpn     []string `json:"alpn"`
+	Replace  bool     `json:"replace"`
 }
 
 // Server -> Hosts

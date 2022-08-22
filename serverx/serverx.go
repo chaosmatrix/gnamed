@@ -1,12 +1,12 @@
 package serverx
 
 import (
+	"context"
 	"errors"
-	"gnamed/configx"
-	"gnamed/libnamed"
 	"sync"
 
-	"golang.org/x/net/context"
+	"gnamed/configx"
+	"gnamed/libnamed"
 )
 
 var (
