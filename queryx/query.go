@@ -381,10 +381,8 @@ func getMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
 	} else {
 		for _, rr := range r.Ns {
 			if rr.Header().Rrtype == dns.TypeSOA {
-				_soa := rr.(*dns.SOA)
-				ttl = _soa.Expire
-				if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
-					ttl = cacheCfg.MaxTTL
+				if soa, ok := rr.(*dns.SOA); ok {
+					ttl = soa.Expire
 				}
 				break
 			}
