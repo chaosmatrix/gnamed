@@ -59,7 +59,7 @@ func main() {
 	}
 
 	// init cache
-	cachex.InitCache(cfg.Server.Cache.Mode)
+	cachex.InitCache(cfg.Server.RrCache.Mode)
 
 	var wg sync.WaitGroup
 

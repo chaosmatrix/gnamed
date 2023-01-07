@@ -100,4 +100,7 @@ func (srv *ServerMux) Serve(config *configx.Config, wg *sync.WaitGroup) {
 		srv.serveAdmin(als[i], wg)
 		libnamed.Logger.Trace().Str("log_type", "admin").Str("address", als[i].Addr).Str("network", als[i].Network).Str("protocol", als[i].Protocol).Msg("")
 	}
+
+	// prof
+	//srv.serveProf(config.Server.Listen[0], wg)
 }

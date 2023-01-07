@@ -7,14 +7,13 @@ import (
 	"unsafe"
 
 	"github.com/miekg/dns"
-	"github.com/rs/zerolog"
 )
 
 func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error) {
 
 	r := dc.IncomingMsg
 
-	subEvent := zerolog.Dict()
+	subEvent := dc.SubLog
 
 	subEvent.Str("protocol", configx.ProtocolTypeDoT).Str("network", "tcp-tls")
 	subEvent.Uint16("id", r.Id).Str("name", r.Question[0].Name)
@@ -56,8 +55,6 @@ func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error
 	subEvent.Dur("latency", rtt)
 
 	subEvent.Err(err)
-
-	dc.Log.Array("quries", zerolog.Arr().Dict(subEvent))
 
 	return resp, err
 }
