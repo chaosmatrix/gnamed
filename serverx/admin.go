@@ -199,7 +199,7 @@ func handleRequestAdminCacheShow(c *gin.Context, logEvent *zerolog.Event, name s
 			})
 			return
 		}
-		cacheTtl := queryx.GetMsgTTL(rmsg, &getGlobalConfig().Server.Cache)
+		cacheTtl := queryx.GetMsgTTL(rmsg, &getGlobalConfig().Server.RrCache)
 		expiredTime := time.Unix(expiredUTC, 0).String()
 		addTime := time.Unix(expiredUTC-int64(cacheTtl), 0)
 

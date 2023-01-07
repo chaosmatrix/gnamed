@@ -51,7 +51,7 @@ type Server struct {
 	NameServer map[string]NameServer `json:"nameserver"`
 	View       map[string]View       `json:"view"`
 	Hosts      []Host                `json:"hosts"`
-	Cache      Cache                 `json:"cache"`
+	RrCache    RrCache               `json:"cache"`
 }
 
 type Main struct {
@@ -183,11 +183,16 @@ type ConnectionPool struct {
 
 // Server -> View
 type View struct {
-	ResolveType   string `json:"resolve_type"`
-	NameServerTag string `json:"nameserver_tag"`
-	Cname         string `json:"cname"`
-	Dnssec        bool   `json:"dnssec"`
-	Subnet        string `json:"subnet"`
+	ResolveType    string   `json:"resolve_type"`
+	NameServerTag  string   `json:"nameserver_tag"` // deprecated
+	NameServerTags []string `json:"nameserver_tags"`
+	Cname          string   `json:"cname"`
+	Dnssec         bool     `json:"dnssec"`
+	Subnet         string   `json:"subnet"`
+
+	// TODO: avaliable for more than one avaliable nameservers
+	//QuerySerial bool `json:"query_parallel"` // parallel query all nameservers, default true
+	//MergeResult bool `json:"merge_result"` // wait all queries return then merge result or return first valid response, default false
 
 	// sometimes can be used to prevent dns hijacking when using dns-over-plain-udp protocol
 	RandomDomain bool `json:"random_domain"` // randomw Upper/Lower domain's chars
@@ -196,7 +201,10 @@ type View struct {
 	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
 	RrHTTPS *RrHTTPS `json:"rr_https"`
 
-	// internal: edns-client-subnet
+	// cache
+	//RrCache *RrCache `json:"rr_cache"` // view's cache
+
+	// internal: edns-client-subnet, parse from Subnet
 	EcsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
 	EcsAddress net.IP `json:"-"`
 	EcsNetMask uint8  `json:"-"`
@@ -210,17 +218,12 @@ type RrHTTPS struct {
 	Replace  bool     `json:"replace"`
 }
 
-// Server -> Hosts
-type Host struct {
-	Name   string `json:"name"`
-	Record string `json:"record"`
-	Qtype  string `json:"qtype"`
-}
-
-// Server -> Cache
-type Cache struct {
+// RR Cache
+type RrCache struct {
 	MaxTTL               uint32  `json:"maxTTL"`
 	MinTTL               uint32  `json:"minTTL"`
+	NxMaxTtl             uint32  `json:"nxMaxTtl"` // TTL for NXDOMAIN
+	NxMinTtl             uint32  `json:"nxMinTtl"`
 	Mode                 string  `json:"mode"`
 	UseSteal             bool    `json:"useSteal"`             // use steal cache, when element expired, return and trigger background query
 	BackgroundUpdate     bool    `json:"backGroundUpdate"`     // true if BackgroundUpdate || UseSteal || BeforeExpiredSecond != 0 || BeforeExpiredPercent != 0
@@ -229,6 +232,13 @@ type Cache struct {
 
 	// internal use
 	backgroundQueryMap *sync.Map `json:"-"`
+}
+
+// Server -> Hosts
+type Host struct {
+	Name   string `json:"name"`
+	Record string `json:"record"`
+	Qtype  string `json:"qtype"`
 }
 
 // Query
@@ -321,7 +331,7 @@ func parseConfig(fname string) (*Config, error) {
 	}
 
 	// verify and defaulting cache configuration options
-	if err = cfg.Server.Cache.parse(); err != nil {
+	if err = cfg.Server.RrCache.parse(); err != nil {
 		return cfg, err
 	}
 
@@ -415,7 +425,7 @@ func (v *View) parse() error {
 	return nil
 }
 
-func (c *Cache) parse() error {
+func (c *RrCache) parse() error {
 	if c.Mode == "" {
 		c.Mode = CacheModeSkipList
 	} else if c.Mode != CacheModeSkipList && c.Mode != CacheModeHashTable {
@@ -455,12 +465,12 @@ func (c *Cache) parse() error {
 
 // try to get lock about key
 // return false, if key already locked, else return true and lock the key
-func (c *Cache) BackgroundQueryTryLock(key string) bool {
+func (c *RrCache) BackgroundQueryTryLock(key string) bool {
 	_, loaded := c.backgroundQueryMap.LoadOrStore(key, true)
 	return !loaded
 }
 
-func (c *Cache) BackgroundQueryUnlock(key string) {
+func (c *RrCache) BackgroundQueryUnlock(key string) {
 	c.backgroundQueryMap.Delete(key)
 }
 
@@ -648,31 +658,39 @@ func (srv *Server) parse() error {
 	// verify using nameserverTag valid
 	for zone, vi := range srv.View {
 
-		if ns, found := srv.NameServer[vi.NameServerTag]; !found {
-			fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", zone, vi.NameServerTag)
-			res = false
-		} else {
-			var err error
+		// compitable with old configuration
+		if len(vi.NameServerTags) == 0 && len(vi.NameServerTag) != 0 {
+			vi.NameServerTags = []string{vi.NameServerTag}
+			srv.View[zone] = vi
+		}
 
-			switch ns.Protocol {
-			case ProtocolTypeDNS:
-				err = ns.Dns.parse()
-			case ProtocolTypeDoH:
-				err = ns.DoH.parse()
-			case ProtocolTypeDoT:
-				err = ns.DoT.parse()
-			case ProtocolTypeDoQ:
-				err = ns.DoQ.parse()
-			default:
-				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", vi.NameServerTag, ns.Protocol)
+		for _, nameserverTag := range vi.NameServerTags {
+			if ns, found := srv.NameServer[nameserverTag]; !found {
+				fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", zone, nameserverTag)
 				res = false
-			}
+			} else {
+				var err error
 
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s', parse failed, error: %v\n", vi.NameServerTag, err)
-				res = false
+				switch ns.Protocol {
+				case ProtocolTypeDNS:
+					err = ns.Dns.parse()
+				case ProtocolTypeDoH:
+					err = ns.DoH.parse()
+				case ProtocolTypeDoT:
+					err = ns.DoT.parse()
+				case ProtocolTypeDoQ:
+					err = ns.DoQ.parse()
+				default:
+					fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", nameserverTag, ns.Protocol)
+					res = false
+				}
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s', parse failed, error: %v\n", nameserverTag, err)
+					res = false
+				}
+				srv.NameServer[nameserverTag] = ns
 			}
-			srv.NameServer[vi.NameServerTag] = ns
 		}
 	}
 	if res {
@@ -699,6 +717,14 @@ func (dod *DODServer) parse() error {
 	}
 
 	dod.Timeout.parse()
+
+	if dod.Network == "" {
+		dod.Network = "udp" // default
+	}
+
+	if dod.Network != "udp" && dod.Network != "tcp" {
+		return fmt.Errorf("invalid dns network '%s', only 'udp' or 'tcp' allow", dod.Network)
+	}
 
 	if dod.Network == "udp" {
 		dod.ClientUDP = &dns.Client{
@@ -981,6 +1007,7 @@ func contructQueryList(qm map[string]QueryList) {
 		}
 
 		// build internal using data struct
+		ql.equalMap = make(map[string]bool)
 		for _, rl := range ql.Equal {
 			ql.equalMap[rl] = true
 		}
@@ -1019,6 +1046,21 @@ func (srv *Server) FindRealName(name string) (string, string) {
 		}
 	}
 	return name, "."
+}
+
+// {nameserver_tag: nameserver}
+func (srv *Server) FindViewNameServers(vname string) map[string]*NameServer {
+	if vi, found := srv.View[vname]; found && vi.ResolveType != ResolveTypeLocal {
+
+		nss := make(map[string]*NameServer)
+		for _, tag := range vi.NameServerTags {
+			if ns, exist := srv.NameServer[tag]; exist {
+				nss[tag] = &ns
+			}
+		}
+		return nss
+	}
+	return nil
 }
 
 // request domain should first call `FindRealName` to get vname (after cname loop if exist)

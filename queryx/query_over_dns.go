@@ -7,27 +7,26 @@ import (
 	"unsafe"
 
 	"github.com/miekg/dns"
-	"github.com/rs/zerolog"
 )
 
 func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error) {
 
 	r := dc.IncomingMsg
-	logEvent := dc.Log
+	//logEvent := dc.Log
 
 	resp := new(dns.Msg)
 	var err error
 	var rtt time.Duration = 0
 
-	eventArr := zerolog.Arr()
-	subEvent := zerolog.Dict()
+	subEvent := dc.SubLog
+	subEvent.Str("protocol", configx.ProtocolTypeDNS).Str("server", dod.Server).Str("network", dod.Network).
+		Uint16("id", r.Id).Str("name", r.Question[0].Name)
+
+	start := time.Now()
 	for _, client := range []*dns.Client{dod.ClientUDP, dod.ClientTCP} {
 		if client == nil {
 			continue
 		}
-
-		subEvent.Str("protocol", configx.ProtocolTypeDNS).Str("server", dod.Server).Str("network", dod.Network).
-			Uint16("id", r.Id).Str("name", r.Question[0].Name)
 
 		if client.Net == "tcp" && dod.ConnectionPoolTCP != nil {
 			// no way to detect vconn already close
@@ -62,23 +61,25 @@ func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error
 				conn.Close()
 			}
 		}
-		subEvent.Dur("latency", rtt)
+
+		if client.Net == "udp" {
+			subEvent.Dur("udp_latency", rtt)
+		} else {
+			subEvent.Dur("tcp_latency", rtt)
+		}
 		if err != nil {
 			break
 		}
 		if resp.Truncated {
-			// re-send via tcp
+			// re-send via tcp, should we let client do this ?
 			subEvent.Bool("truncated", true).Err(err)
-			eventArr.Dict(subEvent)
-			subEvent = zerolog.Dict()
 			continue
 		}
 		break
 	}
 
+	subEvent.Dur("latency", time.Since(start))
 	subEvent.Err(err)
-	eventArr.Dict(subEvent)
-	logEvent.Array("queries", eventArr)
 
 	return resp, err
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
 func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
@@ -113,9 +114,19 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		}
 	}
 
+	view, found := cfg.Server.View[vname]
+	if !found {
+		// must be an internal error
+		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
+		rmsg.Rcode = dns.RcodeServerFailure
+		return r, fmt.Errorf("server failure, no view match qname")
+	}
+
 	// 3. cache search
 	if !byPassCache {
-		cacheCfg := cfg.Server.Cache
+		cacheCfg := cfg.Server.RrCache
+
 		if rmsg, expiredUTC, cacheTTL, found := cacheGetDnsMsg(r, &cacheCfg); found || (cacheCfg.UseSteal && rmsg != nil && expiredUTC > 0) {
 			nowUTC := libnamed.GetFakeTimerUnixSecond()
 			if (cacheCfg.UseSteal || cacheCfg.BackgroundUpdate) && ((cacheCfg.BeforeExpiredSecond > 0 && expiredUTC-cacheCfg.BeforeExpiredSecond <= nowUTC) || (cacheCfg.BeforeExpiredPercent > 0 && expiredUTC-int64((float64(cacheTTL)*cacheCfg.BeforeExpiredPercent)) <= nowUTC)) {
@@ -171,10 +182,11 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	}
 
 	// 5. external query
-	nameServerTag, nameserver := cfg.Server.FindViewNameServer(vname)
-	logEvent.Str("nameserver_tag", nameServerTag)
+	//nameServerTag, nameserver := cfg.Server.FindViewNameServer(vname)
+	//logEvent.Str("nameserver_tag", nameServerTag)
+	nameservers := cfg.Server.FindViewNameServers(vname)
 
-	if nameserver == nil {
+	if nameservers == nil {
 		// shouldn't reach here
 		rmsg := new(dns.Msg)
 		setReply(rmsg, r, qname)
@@ -183,15 +195,12 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	}
 
 	logEvent.Str("query_type", "external")
-	var rmsg *dns.Msg
 
 	oId := dc.IncomingMsg.Id
-	if oId == 0 {
-		dc.IncomingMsg.Id = dns.Id() // make sure incoming msg id not zero
-	}
+	dc.IncomingMsg.Id |= dns.Id()
 
 	// send dnssec query to server that don't support dnssec, might be response with FORMERR
-	view, found := cfg.Server.View[vname]
+	//view, found := cfg.Server.View[vname]
 	if found && (view.Dnssec || view.Subnet != "") {
 		opt := &libnamed.OPTOption{
 			EnableDNSSEC:  view.Dnssec,
@@ -210,19 +219,52 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		dc.IncomingMsg.Question[0].Name = libnamed.RandomUpperDomain(dc.IncomingMsg.Question[0].Name)
 	}
 
+	var rmsg *dns.Msg
+
+	logQueries := zerolog.Arr()
 	queryStartTime := time.Now()
-	switch nameserver.Protocol {
-	case configx.ProtocolTypeDNS:
-		rmsg, err = queryDoD(dc, nameserver.Dns)
-	case configx.ProtocolTypeDoH:
-		rmsg, err = queryDoH(dc, nameserver.DoH)
-	case configx.ProtocolTypeDoT:
-		rmsg, err = queryDoT(dc, nameserver.DoT)
-	case configx.ProtocolTypeDoQ:
-		rmsg, err = queryDoQ(dc, nameserver.DoQ)
-	default:
-		rmsg, err = queryDoD(dc, nameserver.Dns)
+	if len(nameservers) == 1 {
+		for tag, nameserver := range nameservers {
+			dc.SubLog = zerolog.Dict().Str("nameserver_tag", tag)
+
+			rmsg, err = queryNs(dc, nameserver)
+
+			logQueries.Dict(dc.SubLog)
+		}
+	} else {
+		// TODO:
+		// 1. configurable query policy: serial or parallel
+		// 2. configurable result choice policy: first (response) or merge
+		completed := make(chan *queryResult, len(nameservers))
+		for tag, _ := range nameservers {
+			go func(tag string) {
+				// only copy IncommingMsg, share logEvent
+				ndc := &libnamed.DConnection{
+					IncomingMsg: dc.IncomingMsg.Copy(),
+					Log:         nil, // set nil, panic is buggy
+					SubLog:      zerolog.Dict().Str("nameserver_tag", tag),
+				}
+				tmsg, terr := queryNs(ndc, nameservers[tag])
+
+				completed <- &queryResult{
+					msg:    tmsg,
+					err:    terr,
+					subLog: ndc.SubLog,
+				}
+			}(tag)
+		}
+
+		for i := 0; i < len(nameservers); i++ {
+			qr := <-completed // prev function already set timeout
+			logQueries.Dict(qr.subLog)
+			rmsg, err = qr.msg, qr.err
+			if err == nil && rmsg != nil {
+				// using first one
+				break
+			}
+		}
 	}
+	logEvent.Array("queries", logQueries)
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 
 	dc.IncomingMsg.Id = oId
@@ -236,7 +278,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		rmsg, err = queryInterceptHTTPS(r, ips, &view)
 	}
 
-	if view.Dnssec {
+	if rmsg != nil && view.Dnssec {
 		// dnssec unsupported on upstream server
 		logEvent.Bool("dnssec", rmsg.IsEdns0() == nil || rmsg.IsEdns0().Do())
 		logEvent.Str("signature_verify", "TODO")
@@ -246,10 +288,10 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	}
 
 	// 4. cache response
-	if err == nil {
+	if err == nil && rmsg != nil {
 		logEvent.Str("rcode", dns.RcodeToString[rmsg.Rcode])
 
-		cacheTTL := getMsgTTL(rmsg, &cfg.Server.Cache)
+		cacheTTL := getMsgTTL(rmsg, &cfg.Server.RrCache)
 		if cacheTTL == 0 {
 			// rfc1035#section-4.1.3
 			// zero ttl can be use for DNS rebinding attack, for the sake of security, should cache it short time
@@ -269,6 +311,32 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	// 5. update reply msg
 	setReply(rmsg, r, qname)
 
+	return rmsg, err
+}
+
+type queryResult struct {
+	msg    *dns.Msg
+	err    error
+	subLog *zerolog.Event
+}
+
+func queryNs(dc *libnamed.DConnection, nameserver *configx.NameServer) (*dns.Msg, error) {
+	var rmsg *dns.Msg
+	var err error
+	//queryStartTime := time.Now()
+	switch nameserver.Protocol {
+	case configx.ProtocolTypeDNS:
+		rmsg, err = queryDoD(dc, nameserver.Dns)
+	case configx.ProtocolTypeDoH:
+		rmsg, err = queryDoH(dc, nameserver.DoH)
+	case configx.ProtocolTypeDoT:
+		rmsg, err = queryDoT(dc, nameserver.DoT)
+	case configx.ProtocolTypeDoQ:
+		rmsg, err = queryDoQ(dc, nameserver.DoQ)
+	default:
+		rmsg, err = queryDoD(dc, nameserver.Dns)
+	}
+	//logEvent.Dur("latency_query", time.Since(queryStartTime))
 	return rmsg, err
 }
 
@@ -349,11 +417,11 @@ func rrExist(m *dns.Msg, qtype uint16) bool {
 }
 
 // FIXME: public function should not here
-func GetMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
+func GetMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
 	return getMsgTTL(r, cacheCfg)
 }
 
-func getMsgTTL(r *dns.Msg, cacheCfg *configx.Cache) uint32 {
+func getMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
 
 	var ttl uint32 = 0
 
@@ -406,7 +474,7 @@ func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
 	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, cacheTTL)
 }
 
-func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.Cache) (*dns.Msg, int64, uint32, bool) {
+func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.RrCache) (*dns.Msg, int64, uint32, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
 	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {

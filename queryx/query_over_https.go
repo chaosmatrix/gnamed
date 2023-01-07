@@ -26,7 +26,6 @@ var (
 
 // Google Json
 // curl --request GET --header "Accept: application/dns-json" "https://dns.google.com/resolve?name=www.google.com&type=a"
-//
 func queryDoHJson(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event) (*dns.Msg, error) {
 
 	rmsg := new(dns.Msg)
@@ -220,14 +219,13 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	r := dc.IncomingMsg
-	logEvent := dc.Log
+	subEvent := dc.SubLog
 
 	oId := r.Id
 	r.Id = 0
-	logEvent.Str("protocol", configx.ProtocolTypeDoH).Str("network", "tcp").Str("doh_msg_type", string(doh.Format)).
+	subEvent.Str("protocol", configx.ProtocolTypeDoH).Str("network", "tcp").Str("doh_msg_type", string(doh.Format)).
 		Uint16("id", r.Id).Str("name", r.Question[0].Name)
 
-	subEvent := zerolog.Dict()
 	resp := new(dns.Msg)
 	var err error
 
@@ -242,7 +240,6 @@ func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error
 	}
 
 	subEvent.Dur("latancy", time.Since(start)).Err(err)
-	logEvent.Array("queries", zerolog.Arr().Dict(subEvent))
 
 	r.Id = oId
 	if err == nil {

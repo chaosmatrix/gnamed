@@ -13,7 +13,6 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
-	"github.com/rs/zerolog"
 )
 
 // TODO:
@@ -25,7 +24,7 @@ func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error
 	oId := r.Id
 	r.Id = 0
 
-	subEvent := zerolog.Dict()
+	subEvent := dc.SubLog
 
 	subEvent.Str("protocol", configx.ProtocolTypeDoQ).Str("network", "udp").
 		Uint16("id", r.Id).Str("name", r.Question[0].Name)
@@ -35,7 +34,6 @@ func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error
 	defer func() {
 		r.Id = oId
 		subEvent.Dur("lantancy", time.Since(start))
-		dc.Log.Array("queries", zerolog.Arr().Dict(subEvent))
 	}()
 
 	qconn, err := quic.DialAddr(doq.Server, doq.TlsConf, doq.QuicConf)
