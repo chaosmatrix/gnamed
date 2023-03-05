@@ -86,6 +86,7 @@ $ gnamed
 * [ ] optimization: select lowest rtt record (cdn domain)
 * [x] optimization: log format and fields
 * [ ] optimization: algorithm to get dns response cache ttl
+* [ ] secure: block ad or malware ip and domain: https://gitlab.com/malware-filter/urlhaus-filter
 
 ## References
 ### NameServers
