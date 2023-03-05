@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"strings"
 
-	"github.com/lucas-clemente/quic-go"
+	"github.com/quic-go/quic-go"
 )
 
 // DNS-over-QUIC

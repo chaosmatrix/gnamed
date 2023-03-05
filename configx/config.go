@@ -438,6 +438,11 @@ func (c *RrCache) parse() error {
 		return fmt.Errorf("invalid MinTTL %d and MaxTTL %d", c.MinTTL, c.MaxTTL)
 	}
 
+	if c.NxMinTtl > c.NxMaxTtl {
+		fmt.Fprintf(os.Stderr, "[+] invalid NxMinTtl %d and NxMaxTtl %d\n", c.NxMinTtl, c.NxMaxTtl)
+		return fmt.Errorf("invalid NxMinTtl %d and NxMaxTtl %d", c.NxMinTtl, c.NxMaxTtl)
+	}
+
 	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
 		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, do background query every time when cache hit\n", c.BeforeExpiredSecond, c.MaxTTL)
 	}

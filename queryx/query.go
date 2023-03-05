@@ -258,7 +258,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 			qr := <-completed // prev function already set timeout
 			logQueries.Dict(qr.subLog)
 			rmsg, err = qr.msg, qr.err
-			if err == nil && rmsg != nil {
+			if err == nil && rmsg != nil && rmsg.Rcode == dns.RcodeSuccess {
 				// using first one
 				break
 			}
@@ -427,6 +427,11 @@ func getMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
 
 	if r == nil {
 		return ttl
+	}
+
+	// fix upstream server temporary failure
+	if r.Rcode == dns.RcodeServerFailure {
+		return cacheCfg.NxMinTtl
 	}
 
 	if len(r.Answer) > 0 {
