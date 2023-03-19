@@ -98,6 +98,12 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	}
 
 	// 2. whitelist/blacklist search
+	// 2.1 search malware
+	if listName, found := cfg.Filter.MatchDomain(qname); found {
+		rmsg, err := queryFake(r, nil)
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", "filter_"+listName+"_"+qname)
+		return rmsg, err
+	}
 	if _r, _s, _forbidden := cfg.Query.QueryForbidden(qname, qtype); _forbidden {
 		rmsg, err := queryFake(r, nil)
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Str("blacklist", _r+"_"+_s)
@@ -229,6 +235,14 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 
 			rmsg, err = queryNs(dc, nameserver)
 
+			if listName, malwareIP, found := filterCheckIP(rmsg, cfg.Filter.MatchIP); found {
+				rmsg, _ = queryFake(dc.IncomingMsg, nil)
+				if err != nil {
+					err = fmt.Errorf("rrs contain malware IP")
+				}
+				dc.SubLog.Str("blacklist", "filter_"+listName+"_"+malwareIP)
+			}
+
 			logQueries.Dict(dc.SubLog)
 		}
 	} else {
@@ -245,6 +259,13 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 					SubLog:      zerolog.Dict().Str("nameserver_tag", tag),
 				}
 				tmsg, terr := queryNs(ndc, nameservers[tag])
+				if listName, malwareIP, found := filterCheckIP(tmsg, cfg.Filter.MatchIP); found {
+					tmsg, _ = queryFake(ndc.IncomingMsg, nil)
+					if terr != nil {
+						terr = fmt.Errorf("rrs contain malware IP")
+					}
+					ndc.SubLog.Str("blacklist", "filter_"+listName+"_"+malwareIP)
+				}
 
 				completed <- &queryResult{
 					msg:    tmsg,
@@ -403,6 +424,7 @@ func rrFetchIP(m *dns.Msg) []net.IP {
 
 	return res
 }
+
 func rrExist(m *dns.Msg, qtype uint16) bool {
 	if m == nil || m.Answer == nil || len(m.Answer) == 0 {
 		return false
@@ -414,6 +436,30 @@ func rrExist(m *dns.Msg, qtype uint16) bool {
 		}
 	}
 	return false
+}
+
+func filterCheckIP(m *dns.Msg, f func(string) (string, bool)) (string, string, bool) {
+	if m != nil && m.Answer != nil {
+		for _, ans := range m.Answer {
+			rtype := ans.Header().Rrtype
+			if rtype == dns.TypeA {
+				if a, ok := ans.(*dns.A); ok {
+					s := a.A.String()
+					if listName, found := f(s); found {
+						return listName, s, true
+					}
+				}
+			} else if rtype == dns.TypeAAAA {
+				if aaaa, ok := ans.(*dns.AAAA); ok {
+					s := aaaa.AAAA.String()
+					if listName, found := f(s); found {
+						return listName, s, true
+					}
+				}
+			}
+		}
+	}
+	return "", "", false
 }
 
 // FIXME: public function should not here

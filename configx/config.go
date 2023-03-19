@@ -43,6 +43,7 @@ type Config struct {
 	Server             Server              `json:"server"`
 	Query              Query               `json:"query"`
 	Admin              Admin               `json:"admin"`
+	Filter             Filter              `json:"filter"` // filter
 }
 
 type Server struct {
@@ -274,6 +275,7 @@ type Auth struct {
 func ParseConfig(fname string) (*Config, error) {
 	return parseConfig(fname)
 }
+
 func parseConfig(fname string) (*Config, error) {
 	cfg := new(Config)
 	fbs, err := ioutil.ReadFile(fname)
@@ -353,7 +355,16 @@ func parseConfig(fname string) (*Config, error) {
 		}
 	}
 
+	// filter
+	if err = cfg.Filter.Parse(); err != nil {
+		return cfg, err
+	}
+
 	return cfg, err
+}
+
+func (cfg *Config) StopDaemon() {
+	cfg.Filter.StopDaemon()
 }
 
 func (cfg *Config) DumpJson() (string, error) {
