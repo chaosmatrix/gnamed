@@ -32,6 +32,10 @@ func parseArgs() {
 
 func main() {
 	parseArgs()
+
+	// init logger, will be override after configuration file parsed
+	libnamed.InitGlobalLogger()
+
 	cfg, err := configx.ParseConfig(configFile)
 	if err != nil {
 		panic(err)

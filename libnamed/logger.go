@@ -22,6 +22,11 @@ const (
 	DefaultLogType = LogTypeConsole
 )
 
+// init global Logger, inorder to use at startup before parse configuration file
+func InitGlobalLogger() error {
+	return InitDefaultLogger("", zerolog.LevelDebugValue)
+}
+
 func InitDefaultLogger(logFile string, logLevel string) error {
 	var logType LogType = DefaultLogType
 	logPath := ""

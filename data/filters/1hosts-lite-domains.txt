@@ -1,0 +1,26 @@
+# Title: 1Hosts (Lite)
+# Last modified: 2023-03-18T15:38:56.487Z
+# ..............
+#  |URL: https://github.com/badmojr/1Hosts
+#  |Count: 101,056 rules!
+#  |Size: 2.06 MB
+#  |
+#  |Credits & ©: https://o0.pages.dev/-data/lists/assets.txt
+#  |Licence: MPLv2,
+#  | https://www.mozilla.org/en-US/MPL/2.0/
+#  /
+# ( Please report any issues related to this file.
+#  \......................................
+#  | GH: github.com/badmojr/1Hosts/issues
+#  | e-mail: badmojr@gmail.com
+#  | Telegram: t.me/badmojr
+#  \____________________
+
+doubleclick.net
+g.doubleclick.net
+google-analytics.com
+www.google-analytics.com
+googleads.g.doubleclick.net
+adservice.google.com
+stats.g.doubleclick.net
+teams.events.data.microsoft.com

@@ -1,0 +1,15 @@
+# Title: Online Malicious Domains Blocklist
+# Updated: 2023-03-18T12:12:34Z
+# Expires: 1 day (update frequency)
+# Homepage: https://gitlab.com/malware-filter/urlhaus-filter
+# License: https://gitlab.com/malware-filter/urlhaus-filter#license
+# Source: https://urlhaus.abuse.ch/api/
+044d730.netsolhost.com
+1.0.218.230
+1.222.198.69
+1.246.222.107
+1.246.222.127
+1.246.222.16
+1.246.222.18
+1.246.222.19
+1.246.222.20

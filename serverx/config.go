@@ -31,6 +31,9 @@ func updateGlobalConfig() (*configx.Config, error) {
 
 	defaultServerConfig.lock.Lock()
 	defer defaultServerConfig.lock.Unlock()
+
+	defaultServerConfig.cfg.StopDaemon()
+
 	fname := defaultServerConfig.cfg.GetFileName()
 	cfg, err := configx.ParseConfig(fname)
 	if err != nil {
