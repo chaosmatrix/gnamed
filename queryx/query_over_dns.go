@@ -11,7 +11,7 @@ import (
 
 func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error) {
 
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
 	//logEvent := dc.Log
 
 	resp := new(dns.Msg)

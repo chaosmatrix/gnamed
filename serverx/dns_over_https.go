@@ -8,7 +8,7 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"gnamed/queryx"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -47,8 +47,8 @@ func handleCorsPreflight(c *gin.Context) {
 func handleDoHRequest(c *gin.Context) {
 
 	dc := &libnamed.DConnection{
-		IncomingMsg: nil,
-		Log:         libnamed.Logger.Debug(),
+		OutgoingMsg: nil,
+		Log:         libnamed.Logger.Info(),
 	}
 	start := time.Now()
 	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
@@ -93,9 +93,10 @@ func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
 // request:
 // 1. header: "Accept: application/dns-json" or "Accept: application/json" or no require
 // 2. query params: "?name=example.com&type=a&do=true&cd=false&random=xxx&xxx", ignore additional fields
-//     * required: "name", "type"
-//     * optional: "do", "cd"
-//     * ignored: all others
+//   - required: "name", "type"
+//   - optional: "do", "cd"
+//   - ignored: all others
+//
 // 3. path: "resolv" or "dns-query" or others
 //
 // response:
@@ -105,7 +106,6 @@ func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
 // 1. google
 // 2. 1.1.1.1 https://developers.cloudflare.com/1.1.1.1/encrypted-dns/dns-over-https/make-api-requests/dns-json
 // 3. nextdns
-//
 func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 
 	logEvent := dc.Log
@@ -145,8 +145,8 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 	r.RecursionDesired = true
 	r.Question = []dns.Question{q}
 
-	dc.IncomingMsg = r
-	cfg := getGlobalConfig()
+	dc.OutgoingMsg = r
+	cfg := configx.GetGlobalConfig()
 	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
@@ -221,7 +221,6 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 // response:
 // 1. header: "Content-Type: dns-message"
 // 2. body: DNS wireformat
-//
 func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
 
 	logEvent := dc.Log
@@ -265,8 +264,8 @@ func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
 		return
 	}
 
-	dc.IncomingMsg = r
-	cfg := getGlobalConfig()
+	dc.OutgoingMsg = r
+	cfg := configx.GetGlobalConfig()
 	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
@@ -290,15 +289,19 @@ func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		//serveDoHFunc(listen)
+		gin.SetMode(gin.ReleaseMode)
+
+		v := os.Getenv(envGinDisableLog)
+		if v != "" {
+			gin.DefaultWriter = io.Discard
+		}
 		r := gin.New()
-		if os.Getenv(envGinDisableLog) == "" {
+		if v == "" {
 			r.Use(gin.Logger(), gin.Recovery())
 		} else {
 			r.Use(gin.Recovery())
-			gin.DefaultWriter = ioutil.Discard
 			//gin.DefaultErrorWriter = ioutil.Discard
 		}
-		//gin.SetMode(gin.ReleaseMode)
 		r.Use(corsHandler())
 
 		if listen.DohPath == "" {
@@ -320,9 +323,9 @@ func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
 		}
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := httpSrv.Shutdown(context.Background())
-			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")

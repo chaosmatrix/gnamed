@@ -46,8 +46,8 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 		ctx, cancel := context.WithTimeout(conn.Context(), qs.connIdleTimeout)
 		stream, err := conn.AcceptStream(ctx)
 		dc := &libnamed.DConnection{
-			IncomingMsg: nil,
-			Log:         libnamed.Logger.Debug(),
+			OutgoingMsg: nil,
+			Log:         libnamed.Logger.Info(),
 		}
 		logEvent := dc.Log
 		logEvent.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
@@ -77,7 +77,7 @@ func (qs *quicServerOption) handleConnection(conn quic.Connection) {
 
 func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConnection) error {
 	buf := qs.bytesPool.Get().([]byte)
-	defer qs.bytesPool.Put(buf)
+	defer qs.bytesPool.Put(&buf)
 
 	logEvent := dc.Log
 	if err := stream.SetWriteDeadline(time.Now().Add(qs.streamReadTimeout)); err != nil {
@@ -118,9 +118,9 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConne
 		}
 	}
 
-	dc.IncomingMsg = r
+	dc.OutgoingMsg = r
 
-	cfg := getGlobalConfig()
+	cfg := configx.GetGlobalConfig()
 	resp, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
@@ -181,6 +181,8 @@ func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 			panic(err)
 		}
 
+		// notes: 99.7% of their traffic is also smaller than 1,232 bytes.
+		// ref: https://blog.apnic.net/2021/06/16/are-large-dns-messages-falling-to-bits/
 		// https://tools.ietf.org/id/draft-madi-dnsop-udp4dns-00.html
 		// 1232 recommended for dual-stack
 		// 1500 should be enough
@@ -199,9 +201,9 @@ func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
 		}
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := qlisten.Close()
-			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")

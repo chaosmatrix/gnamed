@@ -1,13 +1,12 @@
 package configx
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"gnamed/libnamed"
-	"io/ioutil"
+	"gnamed/runner"
 	"math"
 	"net"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
+	"golang.org/x/net/idna"
 )
 
 type CachePolicyType string
@@ -35,15 +35,58 @@ var (
 	QueryListTypeRegexp  = "Regexp"
 )
 
+type globalConfig struct {
+	cfg  *Config
+	lock *sync.Mutex
+}
+
+var _globalConfig = &globalConfig{}
+
+func InitGlobalConfig(cfg *Config) {
+	_globalConfig = &globalConfig{
+		cfg:  cfg,
+		lock: new(sync.Mutex),
+	}
+}
+
+func UpdateGlobalConfig() error {
+
+	// prevent update frequency
+	if time.Since(_globalConfig.cfg.GetTimestamp()) < 10*time.Second {
+		time.Sleep(10 * time.Second)
+	}
+
+	_globalConfig.lock.Lock()
+	defer _globalConfig.lock.Unlock()
+
+	fname := _globalConfig.cfg.GetFileName()
+	cfg, err := ParseConfig(fname)
+	if err != nil {
+		return err
+	}
+
+	// update pointer rather than update pointer's value, to achive lock-free
+	_globalConfig.cfg = cfg
+
+	return err
+}
+
+func GetGlobalConfig() *Config {
+	return _globalConfig.cfg
+}
+
 type Config struct {
-	filename           string              `json:"-"` // current using configuration file name
-	timestamp          time.Time           `json:"-"` // configuration file parse timestamp
-	lock               sync.Mutex          `json:"-"` // internal use, lazy init some values
-	singleflightGroups [][]*libnamed.Group `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
-	Server             Server              `json:"server"`
-	Query              Query               `json:"query"`
-	Admin              Admin               `json:"admin"`
-	Filter             Filter              `json:"filter"` // filter
+	filename           string               `json:"-"` // current using configuration file name
+	timestamp          time.Time            `json:"-"` // configuration file parse timestamp
+	lock               sync.Mutex           `json:"-"` // internal use, lazy init some values
+	singleflightGroups [][]*libnamed.Group  `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
+	Server             Server               `json:"server"`
+	Query              Query                `json:"query"`
+	Admin              Admin                `json:"admin"`
+	Filter             *Filter              `json:"filter"` // filter
+	FallBack           FallBack             `json:"fallback"`
+	WarmRunnerInfo     *WarmRunnerInfo      `json:"warm"`
+	RunnerOption       *runner.RunnerOption `json:"runner"`
 }
 
 type Server struct {
@@ -95,6 +138,11 @@ type TlsConfig struct {
 	InsecureSkipVerify bool   `json:"insecure"`
 	CertFile           string `json:"certFile"`
 	KeyFile            string `json:"keyFile"`
+
+	// KeyLogWriter - should not used in production
+	// if not empty, all tls master secrets will be writen into this file,
+	// which can be used to decrypt tls traffic with wireshark
+	KeyLogFile string `json:"keyLogFile"`
 }
 
 // Server -> NameServer
@@ -135,6 +183,7 @@ type DOHServer struct {
 	Method  string              `json:"method"`
 	Headers map[string][]string `json:"headers"`
 	Format  DOHMsgType          `json:"format"`
+	HTTP3   bool                `json:"http3"`
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -144,7 +193,8 @@ type DOHServer struct {
 	SocketAttr *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
-	Client *http.Client `json:"-"`
+	client     *http.Client `json:"-"`
+	altSvcOnce *sync.Once   `json:"-"`
 }
 
 type DOTServer struct {
@@ -187,6 +237,7 @@ type View struct {
 	ResolveType    string   `json:"resolve_type"`
 	NameServerTag  string   `json:"nameserver_tag"` // deprecated
 	NameServerTags []string `json:"nameserver_tags"`
+	FallBackTags   []string `json:"FallBack_tags"`
 	Cname          string   `json:"cname"`
 	Dnssec         bool     `json:"dnssec"`
 	Subnet         string   `json:"subnet"`
@@ -196,7 +247,7 @@ type View struct {
 	//MergeResult bool `json:"merge_result"` // wait all queries return then merge result or return first valid response, default false
 
 	// sometimes can be used to prevent dns hijacking when using dns-over-plain-udp protocol
-	RandomDomain bool `json:"random_domain"` // randomw Upper/Lower domain's chars
+	RandomDomain bool `json:"random_domain"` // random Upper/Lower domain's chars
 
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
@@ -216,7 +267,7 @@ type RrHTTPS struct {
 	Priority uint16   `json:"priority"`
 	Target   string   `json:"target"`
 	Alpn     []string `json:"alpn"`
-	Replace  bool     `json:"replace"`
+	Hijack   bool     `json:"hijack"` // QType HTTPS will be hijacked with configured
 }
 
 // RR Cache
@@ -225,6 +276,7 @@ type RrCache struct {
 	MinTTL               uint32  `json:"minTTL"`
 	NxMaxTtl             uint32  `json:"nxMaxTtl"` // TTL for NXDOMAIN
 	NxMinTtl             uint32  `json:"nxMinTtl"`
+	ErrTtl               uint32  `json:"errTTL"` // TTL for not NXDomain ERROR
 	Mode                 string  `json:"mode"`
 	UseSteal             bool    `json:"useSteal"`             // use steal cache, when element expired, return and trigger background query
 	BackgroundUpdate     bool    `json:"backGroundUpdate"`     // true if BackgroundUpdate || UseSteal || BeforeExpiredSecond != 0 || BeforeExpiredPercent != 0
@@ -251,7 +303,7 @@ type Query struct {
 
 type QueryList struct {
 	Equal      []string             `json:"equal"`
-	equalMap   map[string]bool      `json:"-"`
+	equalMap   map[string]struct{}  `json:"-"`
 	Prefix     []string             `json:"prefix"`
 	prefixTrie *libnamed.PrefixTrie `json:"-"`
 	Suffix     []string             `json:"suffix"`
@@ -272,13 +324,57 @@ type Auth struct {
 	Token map[string]string `json:"token"` // user:token
 }
 
+func (c *TlsConfig) parse() (*tls.Config, error) {
+	tlsc := &tls.Config{
+		InsecureSkipVerify: c.InsecureSkipVerify,
+		ServerName:         c.ServerName,
+	}
+	if c.CertFile != "" && c.KeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			return tlsc, err
+		}
+		tlsc.Certificates = []tls.Certificate{cert}
+	}
+
+	if c.KeyLogFile != "" {
+		fw, err := os.OpenFile(c.KeyLogFile, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0600)
+		if err != nil {
+			return tlsc, err
+		}
+		tlsc.KeyLogWriter = fw
+	}
+
+	scs := tls.CipherSuites()
+	cs := make([]uint16, len(scs))
+	for i, sc := range scs {
+		cs[i] = sc.ID
+	}
+
+	// default include Two InsecureCipherSuites:
+	// 1. TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA (0xc012)
+	// 2. TLS_RSA_WITH_3DES_EDE_CBC_SHA (0x000a)
+	//
+	// limitation of built-in "tls" setting CipherSuites:
+	// 1. unable to change the order of CipherSuites for outgoing packet (there is a sorted rule)
+	// 2. tls1.3 only CipherSuites always included for tls1.3
+	// 3. able to select part of CipherSuites and InsecureCipherSuites
+	// 4. unable to change the CipherSuites of quic-tls1.3, it's tls1.3 only CipherSuites
+	//
+	// buiilt-in "tls" didn't support change the order of CipherSuites, the order can be used as a fingerprint
+	// if want to change the order, use the 3rd-party lib "uTLS" instead
+	tlsc.CipherSuites = cs
+
+	return tlsc, nil
+}
+
 func ParseConfig(fname string) (*Config, error) {
 	return parseConfig(fname)
 }
 
 func parseConfig(fname string) (*Config, error) {
 	cfg := new(Config)
-	fbs, err := ioutil.ReadFile(fname)
+	fbs, err := os.ReadFile(fname)
 	if err != nil {
 		return cfg, err
 	}
@@ -310,7 +406,14 @@ func parseConfig(fname string) (*Config, error) {
 			return cfg, err
 		}
 
-		vkFqdn := dns.Fqdn(vk)
+		vkp := ""
+		vkp, err = idna.ToASCII(vk)
+		if err != nil || len(vk) == 0 {
+			fmt.Fprintf(os.Stderr, "[+] can't convert view name %s into punnycode\n", vk)
+			continue
+		}
+
+		vkFqdn := dns.Fqdn(vkp)
 		if vkFqdn != vk {
 			delete(cfg.Server.View, vk)
 		}
@@ -318,7 +421,12 @@ func parseConfig(fname string) (*Config, error) {
 	}
 
 	for i := 0; i < len(cfg.Server.Hosts); i++ {
-		cfg.Server.Hosts[i].Name = dns.Fqdn(cfg.Server.Hosts[i].Name)
+		hpny := ""
+		hpny, err = idna.ToASCII(cfg.Server.Hosts[i].Name)
+		if err != nil || len(hpny) == 0 {
+			continue
+		}
+		cfg.Server.Hosts[i].Name = dns.Fqdn(hpny)
 	}
 
 	if err = cfg.Server.Main.parse(); err != nil {
@@ -356,15 +464,42 @@ func parseConfig(fname string) (*Config, error) {
 	}
 
 	// filter
-	if err = cfg.Filter.Parse(); err != nil {
+	if cfg.Filter == nil {
+		cfg.Filter = new(Filter)
+	}
+	if err = cfg.Filter.parse(); err != nil {
 		return cfg, err
 	}
 
-	return cfg, err
-}
+	// warm runner
+	if cfg.WarmRunnerInfo == nil {
+		cfg.WarmRunnerInfo = new(WarmRunnerInfo)
+	}
+	if err = cfg.WarmRunnerInfo.parse(); err != nil {
+		return cfg, err
+	}
+	if cfg.WarmRunnerInfo.NameServerUDP == "" {
+		for _, ln := range cfg.Server.Listen {
+			if ln.Protocol == ProtocolTypeDNS && (ln.Network == "udp" || ln.Network == "udp6") {
+				cfg.WarmRunnerInfo.NameServerUDP = ln.Addr
+				break
+			}
+		}
+	}
 
-func (cfg *Config) StopDaemon() {
-	cfg.Filter.StopDaemon()
+	// runner
+	if cfg.RunnerOption == nil {
+		cfg.RunnerOption = new(runner.RunnerOption)
+	}
+	if err = cfg.RunnerOption.Parse(); err != nil {
+		return cfg, err
+	}
+
+	if err == nil {
+		InitGlobalConfig(cfg)
+	}
+
+	return cfg, err
 }
 
 func (cfg *Config) DumpJson() (string, error) {
@@ -387,24 +522,19 @@ func (v *View) parse() error {
 	}
 
 	if v.Subnet != "" {
-		ipAddr, ipNet, err := net.ParseCIDR(v.Subnet)
-		if err != nil {
-			ipAddr = net.ParseIP(v.Subnet)
-			if ipAddr == nil {
-				return fmt.Errorf("invalid subNet \"%s\"", v.Subnet)
+		subnet := v.Subnet
+
+		if !strings.Contains(subnet, "/") {
+			if strings.Contains(subnet, ":") {
+				subnet += "/128"
+			} else {
+				subnet += "/32"
 			}
 		}
-		if ipNet == nil {
-			subNet := ""
-			if ipAddr.To4() != nil {
-				subNet = v.Subnet + "/32"
-			} else {
-				subNet = v.Subnet + "/128"
-			}
-			_, ipNet, err = net.ParseCIDR(subNet)
-			if err != nil {
-				return err
-			}
+
+		_, ipNet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			return fmt.Errorf("invalid subNet \"%s\"", v.Subnet)
 		}
 
 		ones, bits := ipNet.Mask.Size()
@@ -420,13 +550,14 @@ func (v *View) parse() error {
 
 	// RrHTTPS
 	if v.RrHTTPS != nil {
-		// priority == 0 is AliasMode
-		// default not AliasMode
-		if len(v.RrHTTPS.Alpn) > 0 && v.RrHTTPS.Priority <= 0 {
+		// rules:
+		// 1. priority == 0 is AliasMode, and must has Target set
+		// 2. if alpn not empty, priority isn't AliasMode, and vice verse
+		if (len(v.RrHTTPS.Target) == 0 || len(v.RrHTTPS.Alpn) > 0) && v.RrHTTPS.Priority <= 0 {
 			v.RrHTTPS.Priority = 1
 		}
 
-		if v.RrHTTPS.Priority != 0 && len(v.RrHTTPS.Alpn) == 0 {
+		if v.RrHTTPS.Priority > 0 && len(v.RrHTTPS.Alpn) == 0 {
 			v.RrHTTPS.Alpn = defaultRrHTTPSAlpn
 		}
 
@@ -452,6 +583,10 @@ func (c *RrCache) parse() error {
 	if c.NxMinTtl > c.NxMaxTtl {
 		fmt.Fprintf(os.Stderr, "[+] invalid NxMinTtl %d and NxMaxTtl %d\n", c.NxMinTtl, c.NxMaxTtl)
 		return fmt.Errorf("invalid NxMinTtl %d and NxMaxTtl %d", c.NxMinTtl, c.NxMaxTtl)
+	}
+
+	if c.ErrTtl == 0 {
+		c.ErrTtl = 60
 	}
 
 	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
@@ -747,7 +882,7 @@ func (dod *DODServer) parse() error {
 			// Default buffer size to use to read incoming UDP message
 			// default 512 B
 			// must increase if edns-client-sub enable
-			UDPSize:      1024,
+			UDPSize:      1280,
 			Net:          "udp",
 			DialTimeout:  dod.Timeout.ConnectDuration,
 			ReadTimeout:  dod.Timeout.ReadDuration,
@@ -760,7 +895,7 @@ func (dod *DODServer) parse() error {
 		// Default buffer size to use to read incoming UDP message
 		// default 512 B
 		// must increase if edns-client-sub enable
-		UDPSize:      1024,
+		UDPSize:      1280,
 		Net:          "tcp",
 		DialTimeout:  dod.Timeout.ConnectDuration,
 		ReadTimeout:  dod.Timeout.ReadDuration,
@@ -858,41 +993,9 @@ func (doh *DOHServer) parse() error {
 
 	doh.Timeout.parse()
 
-	client := &http.Client{
-		Timeout: doh.Timeout.ConnectDuration + doh.Timeout.ReadDuration + doh.Timeout.WriteDuration,
-	}
+	doh.altSvcOnce = &sync.Once{}
 
-	if doh.TlsConfig.ServerName != "" {
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{
-				ServerName:         doh.TlsConfig.ServerName,
-				InsecureSkipVerify: doh.TlsConfig.InsecureSkipVerify,
-			},
-			ForceAttemptHTTP2: true,
-			Proxy:             http.ProxyFromEnvironment,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				d := &net.Dialer{
-					Timeout:       doh.Timeout.ConnectDuration, // connect timeout
-					KeepAlive:     65 * time.Second,
-					FallbackDelay: -1, // disable DualStack test
-				}
-				conn, err := d.DialContext(ctx, network, addr)
-				if err == nil {
-					err = setTCPSocketOpt(&conn, doh.SocketAttr)
-					if err != nil {
-						return conn, err
-					}
-				}
-				return conn, err
-			},
-			MaxIdleConns:          10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		}
-		client.Transport = tr
-	}
-	doh.Client = client
+	doh.initDoHClient()
 	return nil
 }
 
@@ -904,20 +1007,20 @@ func (dot *DOTServer) parse() error {
 	}
 	dot.Server = server
 
-	sni := dot.TlsConfig.ServerName
-	if sni == "" {
-		sni = strings.ToLower(strings.TrimSuffix(host, "."))
+	tlsc, err := dot.TlsConfig.parse()
+	if err != nil {
+		return err
+	}
+	if tlsc.ServerName == "" {
+		tlsc.ServerName = strings.ToLower(host)
 	}
 
 	dot.Timeout.parse()
 
 	dot.Client = &dns.Client{
-		Net: "tcp-tls",
-		TLSConfig: &tls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: dot.TlsConfig.InsecureSkipVerify,
-		},
-
+		Net:          "tcp-tls",
+		UDPSize:      1280,
+		TLSConfig:    tlsc,
 		DialTimeout:  dot.Timeout.ConnectDuration,
 		ReadTimeout:  dot.Timeout.ReadDuration,
 		WriteTimeout: dot.Timeout.WriteDuration,
@@ -983,49 +1086,94 @@ func lookupIP(name string, nameservers []string) string {
 		nss = defaultExternalNameServers
 	}
 	for _, ns := range nss {
-		r := new(dns.Msg)
-		r.SetQuestion(dns.Fqdn(name), dns.TypeA)
-		client := dns.Client{
-			Timeout: 5 * time.Second,
-		}
-		if resp, _, err := client.Exchange(r, ns); err == nil {
-			for _, ans := range resp.Answer {
-				if a, ok := ans.(*dns.A); ok {
-					return a.A.String()
-				}
+		for _, network := range []string{"udp", "tcp"} {
+			r := new(dns.Msg)
+			r.SetQuestion(dns.Fqdn(name), dns.TypeA)
+			client := dns.Client{
+				Timeout: 5 * time.Second,
+				UDPSize: 1280,
+				Net:     network,
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "[+] resolve domain '%s' failed, error: '%s'\n", name, err)
+			if resp, _, err := client.Exchange(r, ns); err == nil {
+				for _, ans := range resp.Answer {
+					if a, ok := ans.(*dns.A); ok {
+						return a.A.String()
+					}
+				}
+				break
+			} else {
+				fmt.Fprintf(os.Stderr, "[+] resolve domain '%s' from '%s' via '%s' failed, error: '%s'\n", name, ns, network, err)
+			}
 		}
 	}
 
 	return ""
 }
 
+const constQueryQtypeALL string = "ALL" // special qtype to identify all dns qtype
+
 // parse contruct QueryList
 func (q *Query) parse() error {
 
-	contructQueryList(q.BlackList)
-	contructQueryList(q.WhiteList)
+	err := contructQueryList(q.BlackList)
+	if err != nil {
+		return err
+	}
+	err = contructQueryList(q.WhiteList)
 
-	return nil
+	return err
 }
 
-func contructQueryList(qm map[string]QueryList) {
-	for t, ql := range qm {
+// TODO: should not skip invalid rule
+func contructQueryList(qm map[string]QueryList) error {
+	var err error
+
+	for qt, ql := range qm {
+		t := strings.ToUpper(qt)
+		if _, found := dns.StringToType[t]; !found && t != constQueryQtypeALL {
+			libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Msgf("invalid qtype %s", qt)
+			return fmt.Errorf("skip invalid qtype %s", qt)
+		}
 
 		// pre process input
-		for i := range ql.Equal {
-			ql.Equal[i] = dns.Fqdn(ql.Equal[i])
+		for i, s := range ql.Equal {
+			s, err = idna.ToASCII(ql.Equal[i])
+			if err != nil || len(s) == 0 {
+				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid equal rule '%s'", ql.Equal[i])
+				if err == nil {
+					return fmt.Errorf("invalid equal rule '%s'", ql.Equal[i])
+				}
+				return err
+			}
+			ql.Equal[i] = dns.Fqdn(s)
 		}
-		for i := range ql.Suffix {
-			ql.Suffix[i] = dns.Fqdn(ql.Suffix[i])
+		for i, s := range ql.Suffix {
+			s, err = idna.ToASCII(ql.Suffix[i])
+			if err != nil || len(s) == 0 {
+				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid suffix rule '%s'", ql.Suffix[i])
+				if err == nil {
+					return fmt.Errorf("invalid suffix rule '%s'", ql.Equal[i])
+				}
+				return err
+			}
+			ql.Suffix[i] = dns.Fqdn(s)
+		}
+		for i, s := range ql.Prefix {
+			s, err = idna.ToASCII(ql.Prefix[i])
+			if err != nil || len(s) == 0 {
+				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid prefix rule '%s'", ql.Prefix[i])
+				if err == nil {
+					return fmt.Errorf("invalid prefix rule '%s'", ql.Equal[i])
+				}
+				return err
+			}
+			ql.Prefix[i] = s
 		}
 
 		// build internal using data struct
-		ql.equalMap = make(map[string]bool)
+		ql.equalMap = make(map[string]struct{}, len(ql.Equal))
 		for _, rl := range ql.Equal {
-			ql.equalMap[rl] = true
+			ql.equalMap[rl] = struct{}{}
 		}
 		ql.prefixTrie = libnamed.NewPrefixTrie(ql.Prefix)
 		ql.suffixTrie = libnamed.NewSuffixTrie(ql.Suffix)
@@ -1034,22 +1182,30 @@ func contructQueryList(qm map[string]QueryList) {
 			// pre-compile regexp
 			ql.regexp = make([]*regexp.Regexp, len(ql.Regexp))
 			for i := range ql.Regexp {
-				ql.regexp[i] = regexp.MustCompile(ql.Regexp[i])
+				ql.regexp[i], err = regexp.Compile(ql.Regexp[i])
+				if err != nil {
+					libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid regexp rule '%s'", ql.Regexp[i])
+					return err
+				}
 			}
 		}
 
 		qm[t] = ql
 	}
+	return err
 }
 
 // return (cname, vname), if cname exist, else name
 func (srv *Server) FindRealName(name string) (string, string) {
 	idx := 0
-	for i := 0; i < maxCnameCounts; i++ {
+
+	cnameCount := 0
+	for i := 0; i < 255; i++ {
 		if vi, found := srv.View[name[idx:]]; found {
-			if len(vi.Cname) != 0 && name != vi.Cname {
+			if len(vi.Cname) != 0 && name != vi.Cname && cnameCount < maxCnameCounts {
 				name = vi.Cname
 				idx = 0
+				cnameCount++
 				continue
 			} else {
 				return name, name[idx:]
@@ -1057,8 +1213,10 @@ func (srv *Server) FindRealName(name string) (string, string) {
 		}
 
 		idx = strings.Index(name[idx:], ".") + idx
-		if idx != len(name)-1 {
+		if idx < len(name)-1 {
 			idx++
+		} else {
+			break
 		}
 	}
 	return name, "."
@@ -1120,11 +1278,17 @@ func (q *Query) MatchWhitlist(name string, qtype string) (string, string, bool) 
 	if ql, found := q.WhiteList[qtype]; found {
 		return ql.Match(name)
 	}
+	if ql, found := q.WhiteList[constQueryQtypeALL]; found {
+		return ql.Match(name)
+	}
 	return "", "", false
 }
 
 func (q *Query) MatchBlacklist(name string, qtype string) (string, string, bool) {
 	if ql, found := q.BlackList[qtype]; found {
+		return ql.Match(name)
+	}
+	if ql, found := q.BlackList[constQueryQtypeALL]; found {
 		return ql.Match(name)
 	}
 	return "", "", false

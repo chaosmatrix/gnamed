@@ -8,8 +8,8 @@
         "listen": [
             {"addr": "127.0.1.2:53", "network": "tcp", "protocol": "dns"},
             {"addr": "127.0.1.2:53", "network": "udp", "protocol": "dns"},
-            {"addr": "[::1]:53", "network": "tcp6", "protocol": "dns"},
-            {"addr": "[::1]:53", "network": "udp6", "protocol": "dns"},
+            {"addr": "[::1]:3053", "network": "tcp6", "protocol": "dns"},
+            {"addr": "[::1]:3053", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}},
@@ -23,17 +23,21 @@
         ],
         "nameserver": {
             "tag_doh_cf_json_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "GET", "headers": {"content-type": ["application/dns-json"]}, "format": "JSON", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_cf_rfc8484_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
+            "tag_doh_cf_rfc8484_01": {"protocol": "https", "doh": {"url": "https://1.0.0.1/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1", "keyLogFile": "./data/ssl_session.log"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "60s"}}},
+            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "60s"}}},
             "tag_dns_adguard": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "udp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "pool": {"idleTimeout": "30s", "Size": 10}}},
             "tag_dns_adguard_tcp": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "tcp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "pool": {"idleTimeout": "900s", "Size": 10, "queriesPerConn": 5}, "socketAttr": {"keepAliveInterval": 0, "disableNoDelay": false, "CloseWithRst": false}}},
             "tag_dot_cf": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
             "tag_dot_cf_one": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
             "tag_doq_adguard_filter_01": {"protocol": "quic", "doq": {"server": "94.140.15.15:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
             "tag_doq_adguard_unfiltered_01": {"protocol": "quic", "doq": {"server": "94.140.14.140:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_adguard_filter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.15.15/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
+            "tag_doh_adguard_filter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.15.15/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
             "tag_doh_adguard_unfilter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.14.140/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns-unfiltered.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
             "tag_dot_localhost": {"protocol": "tls-tcp", "dot": {"server": "127.0.1.2:853",  "tls_config": {"serverName": "127.0.1.2", "insecure": true}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
+            
+            "tag_doh_quad9_ecs_rfc8484": {"protocol": "https", "doh": {"url": "https://9.9.9.9/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "115s"}, "dns_opt": {"dnssec": false, "ecs": false}}},
+            "tag_doh_quad9_ecs_rfc8484_0x1": {"protocol": "https", "doh": {"url": "https://223.5.5.5/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "223.5.5.5"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "115s"}, "dns_opt": {"dnssec": false, "ecs": false}}},
+            
             "tag_grpc": {"protocol": "grpc", "grpc": {"timeout": {}}}
         },
         "view": {
@@ -45,9 +49,11 @@
             "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."},
             "www.github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01_one"},
             "github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf_one"},
+            "com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_adguard_filter_rfc8484_01"},
+            "google.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01_one"]},
             "dns.adguard.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doq_adguard_filter_01"},
-            "dns-unfiltered.adguard.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doq_adguard_unfiltered_01"}
-
+            "bing.net.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_quad9_ecs_rfc8484", "rr_https": {"priority": 1, "hijack": true}},
+            "office.net.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_quad9_ecs_rfc8484_0x1"}
         },
         "hosts": [
             {"name": "localhost.", "record": "127.0.0.1", "qtype": "A"},
@@ -90,12 +96,13 @@
         }
     },
     "filter": {
-        "background": true,
-        "default": {"path": "./data/filters/", "refresh": "5m", "_comment": "default option if rest didn't set"},
+        "background": false,
+        "global": {"path": "./data/filters/"},
+        "timer": "10m",
         "lists": {
-            "malware-filter-domains-online": {"name": "", "filename": "urlhaus-filter-domains-online.txt", "refresh_at_startup": true, "refresh": "2m", "parser": "", "url": "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt"},
-            "malware-filter-agh": {"filename": "urlhaus-filter-agh-online.txt", "refresh_at_startup": true, "refresh": "3m", "parser": "agh", "url": "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh-online.txt"},
-            "malware-filter-1hosts-lite": {"filename": "1hosts-lite-domains.txt", "refresh_at_startup": true, "refresh": "3m", "parser": "", "url": "https://o0.pages.dev/Lite/domains.txt"}
+            "filter-dan-pollock-hosts": {"filename": "dan-pollock-hosts.txt", "refresh_at_startup": true, "refresh": "5h30m", "syntax": "hosts", "url": "https://someonewhocares.org/hosts/zero/hosts"},
+            "phishing_army_blocklist_extended": {"filename": "phishing_army_blocklist_extended.txt", "refresh_at_startup": true, "refresh": "5h30m", "url": "https://phishing.army/download/phishing_army_blocklist_extended.txt"},
+            "privacy-filter-1hosts-lite": {"filename": "1hosts-lite-domains.txt", "refresh_at_startup": true, "refresh": "5h30m", "url": "https://o0.pages.dev/Lite/domains.txt"}
         }
     },
     "admin": {
@@ -107,7 +114,15 @@
             "token": {"user": "password"}
         }
     },
-    "files": {
-        "ecs_iplist": "./ip.list"
+    "warm": {
+        "filename": "./data/warm.json",
+        "delay": "1m",
+        "interval": "0s",
+        "concurrency": 8,
+        "frequencyUpTo": 1,
+        "unused_time": "1h",
+        "NameServerUDP": "127.0.1.2:53",
+        "storeNonWarmUpCache": false,
+        "maxminddb": "./data/maxminddb/GeoLite2-Country.mmdb"
     }
 }
