@@ -231,7 +231,6 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 			SourceIP:      view.EcsAddress,
 			Family:        view.EcsFamily,
 			SourceNetmask: view.EcsNetMask,
-			SourceScope:   view.EcsNetMask,
 			UDPSize:       1280,
 		}
 		libnamed.SetOpt(r, opt)
