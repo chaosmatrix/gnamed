@@ -16,15 +16,15 @@ import (
 
 func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
 	dc := &libnamed.DConnection{
-		IncomingMsg: r,
-		Log:         libnamed.Logger.Debug(),
+		OutgoingMsg: r,
+		Log:         libnamed.Logger.Info(),
 	}
 
 	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
 	start := time.Now()
 
-	cfg := getGlobalConfig()
+	cfg := configx.GetGlobalConfig()
 	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
@@ -52,6 +52,7 @@ func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 			Addr:          listen.Addr,
 			Net:           listen.Network,
 			MaxTCPQueries: listen.QueriesPerConn,
+			UDPSize:       1280,
 			IdleTimeout:   func() time.Duration { return listen.Timeout.IdleDuration },
 			ReadTimeout:   listen.Timeout.ConnectDuration,
 			WriteTimeout:  listen.Timeout.WriteDuration,
@@ -62,9 +63,9 @@ func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 		//dns.HandleFunc(".", handleFunc)
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := dos.Shutdown()
-			logEvent := libnamed.Logger.Debug().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")

@@ -4,268 +4,965 @@ import (
 	"bufio"
 	"compress/flate"
 	"compress/gzip"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"gnamed/libnamed"
+	"gnamed/runner"
 	"io"
-	"math/rand"
-	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/idna"
+
+	"github.com/andybalholm/brotli"
 	"github.com/miekg/dns"
-	"golang.org/x/net/context"
 )
 
 // Data Sources:
 // * https://gitlab.com/malware-filter/urlhaus-filter
-// 	* https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh-online.txt
-//  * https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt
 // * https://filterlists.com/
 
-// random String
-var randStr = strconv.Itoa(int(rand.NewSource(time.Now().Unix()).Int63() % 100000))
-
 type Filter struct {
-	Background bool                     `json:"background"` // parsed filter Background
-	Default    FilterConfig             `json:"default"`
-	Lists      map[string]*FilterConfig `json:"lists"`
-
-	// internal using
-	tables        map[string]*lookupTable `json:"-"` // name -> filter
-	stopChan      chan struct{}           `json:"-"` // signal deamon to exit
-	daemonRunning bool                    `json:"-"` // tag daemon running or not
-	stats         *filterStats            `json:"-"`
-}
-
-type FilterConfig struct {
-	Path             string `json:"path"`
-	Refresh          string `json:"refresh"`
-	Parser           string `json:"parser"`
-	Filename         string `json:"filename"`
-	Url              string `json:"url"`
-	RefreshAtStartup bool   `json:"refresh_at_startup"`
+	Background    bool                   `json:"background"`
+	Global        FilterGlobal           `json:"global"`
+	Lists         map[string]*FilterInfo `json:"lists"`
+	DisableStats  bool                   `json:"disable_stats"` // stats domain hit count, which has performance hit
+	Timer         string                 `json:"timer"`
+	timerDuration time.Duration          `json:"-"`
 
 	// internal
-	refreshDuration time.Duration `json:"-"` // internal use
-	fpath           string        `json:"-"` // internal use, full path file name
-	lookupTable     *lookupTable  `json:"-"` // refer Filter.tables[name]
+	filterStats  *filterStats `json:"-"`
+	signalChan   chan string  `json:"-"`
+	daemonEnable bool         `json:"-"`
 }
-
-type lookupTable struct {
-	id      atomic.Uint32
-	lock    *sync.RWMutex
-	domains [2]map[string]bool
-	ips     [2]map[string]bool
-}
-
-// internal use
-type filterStats struct {
-	total       atomic.Int64
-	domainTotal atomic.Int64
-	ipTotal     atomic.Int64
-	domainHit   atomic.Int64
-	ipHit       atomic.Int64
-}
-
-type ParserFuncNameType string
-type ParserFuncType func(fname string) (domains map[string]bool, ips map[string]bool)
 
 const (
-	ParserFuncNameDefault = "default"
-	ParserFuncNameAgh     = "agh" // AdGuard Home
+	signalReload = "SIGHUP"
+	signalStop   = "SIGQUIT"
 )
 
-var allowFilterParser = []string{ParserFuncNameDefault, ParserFuncNameAgh}
-
-type ParserTypeInterface interface {
-	setFileds(lt *lookupTable)
-	parse(fname string) error
+type FilterGlobal struct {
+	Path          string        `json:"path"`
+	Concurrency   int           `json:"concurrency"`
+	Delay         string        `json:"delay"` // delay before updating filters at startup
+	DelayDuration time.Duration `json:"-"`
 }
 
-// mapping parser into struct
-// struct info will be changed after every time used
-var _pm = map[string]func() ParserTypeInterface{
-	ParserFuncNameDefault: func() ParserTypeInterface { return &defaultParser{} },
-	ParserFuncNameAgh:     func() ParserTypeInterface { return &aghParser{} },
+type FilterInfo struct {
+	Path                  string         `json:"path"`
+	FileName              string         `json:"filename"`
+	Url                   string         `json:"url"`
+	Refresh               string         `json:"refresh"`
+	RefreshDuration       time.Duration  `json:"-"`
+	SyntaxRegex           string         `json:"syntax_regex"`
+	syntaxRegex           *regexp.Regexp `json:"-"`
+	Syntax                string         `json:"syntax"`
+	SyntaxCommentBytes    []byte         `json:"syntax_comment_bytes"`
+	SyntaxDetectLine      int            `json:"syntax_detect_line"`
+	SyntaxDetectLineValid int            `json:"syntax_detect_line_valid"`
+	Timeout               string         `json:"timeout"`
+	TimeoutDuration       time.Duration  `json:"-"`
+	RefreshAtStartup      bool           `json:"refresh_at_startup"`
+
+	// internal
+	lock             *sync.Mutex             `json:"-"`
+	filterTable      *filterTable            `json:"-"`
+	syntaxParserFunc TypeSyntaxParserFunc    `json:"-"`
+	updateTime       time.Time               `json:"-"`
+	stats            *filterSyntaxParseStats `json:"-"`
+
+	fpath string `json:"-"`
 }
 
-type FilterStats struct {
-	Total       int64
-	DomainTotal int64
-	IPTotal     int64
-	DomainHit   int64
-	IPHit       int64
+type filterTable struct {
+	id      *atomic.Uint32
+	domains []map[string]struct{}
+	ips     []map[string]struct{}
 }
 
-func (f *Filter) GetStats() FilterStats {
-	return FilterStats{
-		Total:       f.stats.total.Load(),
-		DomainTotal: f.stats.domainTotal.Load(),
-		IPTotal:     f.stats.ipTotal.Load(),
-		DomainHit:   f.stats.domainHit.Load(),
-		IPHit:       f.stats.ipHit.Load(),
+type filterStats struct {
+	lock      *sync.Mutex
+	HitMap    map[string]int // domain: hit_count
+	hit       *atomic.Uint64
+	ipHit     *atomic.Uint64
+	domainHit *atomic.Uint64
+}
+
+func (fns *filterStats) update(rs string, rt string, disableStats bool) {
+
+	if !disableStats {
+		fns.lock.Lock()
+		fns.HitMap[rs]++
+		fns.lock.Unlock()
+	}
+
+	fns.hit.Add(1)
+	switch rt {
+	case filterRuleTypeIP:
+		fns.ipHit.Add(1)
+	case filterRuleTypeDomain:
+		fns.domainHit.Add(1)
+	}
+
+}
+
+type FilterHitStats struct {
+	HitMap    map[string]int
+	Total     int
+	IPHit     int
+	DomainHit int
+}
+
+func (f *Filter) GetStats() string {
+
+	fns := f.filterStats
+	m := make(map[string]int)
+	if !f.DisableStats {
+		fns.lock.Lock()
+		m = fns.HitMap
+		defer fns.lock.Unlock()
+	}
+
+	res := &FilterHitStats{
+		HitMap:    m,
+		Total:     int(fns.hit.Load()),
+		IPHit:     int(fns.ipHit.Load()),
+		DomainHit: int(fns.domainHit.Load()),
+	}
+
+	bs, err := json.MarshalIndent(res, "", "\t")
+	if err != nil {
+		return "{}"
+	}
+	return string(bs)
+}
+
+type TypeSyntaxParserFunc func(string) (rule string, ruleType string)
+
+const (
+	filterRuleTypeDomain  string = "domain"
+	filterRuleTypeIP      string = "ip"
+	filterRuleTypeInvalid string = "invalid"
+
+	filterSyntaxTypeAdblock string = "adblock"
+	filterSyntaxTypeDomain  string = "domain"
+	filterSyntaxTypeHosts   string = "hosts"
+	filterSyntaxTypeDnsmasq string = "dnsmasq"
+	filterSyntaxTypeRegexp  string = "regexp"
+
+	syntaxDetectLine      int = 100
+	syntaxDetectLineValid int = 23
+)
+
+var (
+	syntaxCommentBytes []byte = []byte{'#', '!', '[', ' '}
+)
+
+var filterSyntaxParserMap = map[string]TypeSyntaxParserFunc{
+	filterSyntaxTypeAdblock: builtInFilterSyntaxAdblock,
+	filterSyntaxTypeDomain:  builtInFilterSyntaxDomain,
+	filterSyntaxTypeHosts:   builtInFilterSyntaxHosts,
+	filterSyntaxTypeDnsmasq: builtInFilterSyntaxDnsmasq,
+}
+
+func (fi *FilterInfo) detectFilterSyntaxParser() error {
+
+	if f, found := filterSyntaxParserMap[fi.Syntax]; found {
+		fi.syntaxParserFunc = f
+		return nil
+	}
+
+	filterSyntaxRegexpFunc := func(s string) (string, string) {
+		s = strings.TrimSpace(s)
+		s = fi.syntaxRegex.FindString(s)
+		return filterSyntaxParse(s)
+	}
+
+	if fi.syntaxRegex != nil {
+		fi.Syntax = filterSyntaxTypeRegexp
+		fi.syntaxParserFunc = filterSyntaxRegexpFunc
+		return nil
+	}
+
+	fr, err := os.Open(fi.fpath)
+	if err != nil {
+		return err
+	}
+	defer fr.Close()
+
+	mc := make(map[string]int, len(filterSyntaxParserMap))
+
+	sc := bufio.NewScanner(fr)
+	for i := 0; i < fi.SyntaxDetectLine && sc.Scan(); i++ {
+		s := strings.TrimSpace(sc.Text())
+		if len(s) == 0 {
+			continue
+		}
+
+		for bfn, bff := range filterSyntaxParserMap {
+			if rs, _ := bff(s); len(rs) != 0 {
+				mc[bfn]++
+			}
+		}
+	}
+
+	maxCnt := 0
+	for bfn, cnt := range mc {
+		if cnt > fi.SyntaxDetectLineValid && maxCnt < cnt {
+			fi.syntaxParserFunc = filterSyntaxParserMap[bfn]
+			fi.Syntax = bfn
+			maxCnt = cnt
+		}
+	}
+
+	if fi.syntaxParserFunc != nil {
+		return nil
+	}
+
+	return fmt.Errorf("no valid SyntaxParser detect and no regexp syntax configured")
+}
+
+func filterSyntaxIsComment(s string) bool {
+	return len(s) == 0 || s[0] == '#' || s[0] == '[' || s[0] == '!'
+}
+
+func filterSyntaxParse(s string) (string, string) {
+	if len(s) == 0 {
+		return "", ""
+	}
+
+	if _, err := netip.ParseAddr(s); err == nil {
+		return s, filterRuleTypeIP
+	}
+	rs, err := idna.Punycode.ToASCII(dns.Fqdn(s))
+	if err != nil || !libnamed.ValidateDomain(rs) {
+		return "", filterRuleTypeInvalid
+	}
+	return rs, filterRuleTypeDomain
+}
+
+// Default Syntax (Domains)
+// format:
+/*
+# Title: 1Hosts (Lite)
+
+doubleclick.net
+g.doubleclick.net
+*/
+//
+func builtInFilterSyntaxDomain(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	if filterSyntaxIsComment(s) {
+		return "", ""
+	}
+	return filterSyntaxParse(s)
+}
+
+// Adblock Syntax (Adblock Plus)
+// format:
+/*
+[Adblock Plus]
+! Syntax: Adblock Plus Filter List
+
+||0--foodwarez.da.ru^
+*/
+//
+func builtInFilterSyntaxAdblock(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	if len(s) < 4 {
+		return "", ""
+	}
+
+	if filterSyntaxIsComment(s) {
+		return "", ""
+	}
+	s = s[2 : len(s)-1]
+
+	return filterSyntaxParse(s)
+}
+
+// Hosts Syntax (Hosts)
+// format:
+/*
+127.0.0.1 ad.example.com
+0.0.0.0 ad.example.com
+0.0.0.0 ad.example.com # host example
+*/
+//
+func builtInFilterSyntaxHosts(s string) (string, string) {
+	s = strings.TrimSpace(s)
+
+	if filterSyntaxIsComment(s) {
+		return "", ""
+	}
+	i := 0
+	for ; i < len(s) && s[i] != ' '; i++ {
+	}
+	for ; i < len(s) && s[i] == ' '; i++ {
+	}
+	j := i + 1
+	for ; j < len(s) && s[j] != ' '; j++ {
+	}
+
+	if i > 0 && i < j && j <= len(s) {
+		s = s[i:j]
+	} else {
+		return "", ""
+	}
+
+	return filterSyntaxParse(s)
+}
+
+// dnsmasq domains list (dnsmasq)
+// format:
+/*
+server=/teams.events.data.microsoft.com/
+server=/fp.measure.office.com/
+server=/app-measurement.com/
+*/
+//
+func builtInFilterSyntaxDnsmasq(s string) (string, string) {
+	s = strings.TrimSpace(s)
+
+	if filterSyntaxIsComment(s) {
+		return "", ""
+	}
+
+	p := "server=/"
+	if len(s) <= len(p) || s[:len(p)] != p {
+		return "", ""
+	}
+
+	return filterSyntaxParse(s[8 : len(s)-1])
+}
+
+func InitFilter() error {
+	return nil
+}
+
+func (f *Filter) init() error {
+	var err error
+
+	err = f.parse()
+	if err != nil {
+		return err
+	}
+	err = f.loadLocalFilterFiles()
+	if err != nil {
+		return err
+	}
+	err = f.updateLocalFilterFiles()
+	if err != nil {
+		return err
+	}
+	return err
+}
+
+func (f *Filter) Start() error {
+
+	if f.Background {
+		go func() {
+			f.loadLocalFilterFiles()
+			time.Sleep(1 * time.Minute)
+			f.updateLocalFilterFiles()
+			if f.daemonEnable {
+				f.daemon()
+			}
+		}()
+	} else {
+		f.loadLocalFilterFiles()
+		go func() {
+			time.Sleep(1 * time.Minute)
+			f.updateLocalFilterFiles()
+			if f.daemonEnable {
+				f.daemon()
+
+			}
+		}()
+	}
+	return nil
+}
+
+func (f *Filter) Stop() error {
+
+	if f.daemonEnable {
+		f.signalChan <- signalStop
+	}
+	return nil
+}
+
+func (f *Filter) UpdateLocalFilterFiles() error {
+	return f.updateLocalFilterFiles()
+}
+
+func (f *Filter) LoadLocalFilterFiles() error {
+	return f.loadLocalFilterFiles()
+}
+
+func (f *Filter) DaemonStart() {
+	if f.daemonEnable {
+		f.daemon()
 	}
 }
 
-func (f *Filter) StopDaemon() {
-	if f.daemonRunning {
-		f.stopChan <- struct{}{}
+type filterContentMashal struct {
+	Stats   map[string]int      `json:"stats"`
+	Domains map[string]struct{} `json:"domains"`
+	Ips     map[string]struct{} `json:"ips"`
+}
+
+// marshal filter lookup table into string
+func (f *Filter) MarshalFilter(name string) string {
+	fi := f.Lists[name]
+	if fi == nil {
+		return "{\"message\": \"invalid filter name\"}"
+	}
+
+	fi.lock.Lock()
+
+	id := fi.filterTable.id.Load()
+	dm := fi.filterTable.domains[id]
+	im := fi.filterTable.ips[id]
+
+	fi.lock.Unlock()
+
+	res := &filterContentMashal{
+		Stats:   map[string]int{"domain": len(dm), "ips": len(im)},
+		Domains: dm,
+		Ips:     im,
+	}
+
+	bs, err := json.MarshalIndent(res, "", " ")
+	if err != nil {
+		return "{\"message\": \"failed to marshal filter content\"}"
+	}
+	return string(bs)
+}
+
+func (f *Filter) parse() error {
+
+	f.filterStats = &filterStats{
+		lock:      new(sync.Mutex),
+		HitMap:    make(map[string]int, 0),
+		hit:       &atomic.Uint64{},
+		ipHit:     &atomic.Uint64{},
+		domainHit: &atomic.Uint64{},
+	}
+
+	f.signalChan = make(chan string)
+	if f.Timer == "" {
+		f.timerDuration = 23 * time.Minute
+	} else {
+		t, err := time.ParseDuration(f.Timer)
+		if err != nil {
+			f.timerDuration = 23 * time.Minute
+		} else {
+			if t < 1*time.Minute {
+				f.timerDuration = 1 * time.Minute
+			} else {
+				f.timerDuration = t
+			}
+		}
+	}
+
+	if f.Global.Delay == "" {
+		f.Global.DelayDuration = 5 * time.Second
+	} else {
+		if d, err := time.ParseDuration(f.Global.Delay); err == nil && d > 0 {
+			f.Global.DelayDuration = d
+		} else {
+			if err != nil {
+				return err
+			}
+			f.Global.DelayDuration = 5 * time.Second
+		}
+	}
+
+	unixTime := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	for ln, l := range f.Lists {
+		l.lock = new(sync.Mutex)
+
+		if l.Timeout != "" {
+			t, err := time.ParseDuration(l.Timeout)
+			if err != nil {
+				return err
+			}
+			l.TimeoutDuration = t
+		}
+		if l.TimeoutDuration < 60*time.Second {
+			l.TimeoutDuration = 60 * time.Second
+		} else if l.TimeoutDuration > 180*time.Second {
+			l.TimeoutDuration = 180 * time.Second
+		}
+
+		if l.Refresh != "" {
+			t, err := time.ParseDuration(l.Refresh)
+			if err != nil {
+				return err
+			}
+			if t < 60*time.Second {
+				l.RefreshDuration = 60 * time.Second
+			} else {
+				l.RefreshDuration = t
+			}
+			f.daemonEnable = true
+		}
+
+		if l.SyntaxRegex != "" {
+			xp, err := regexp.Compile(l.SyntaxRegex)
+			if err != nil {
+				return err
+			}
+			l.Syntax = filterSyntaxTypeRegexp
+			l.syntaxRegex = xp
+		}
+
+		if f.Global.Concurrency <= 0 {
+			f.Global.Concurrency = 8
+		}
+		if f.Global.Concurrency > len(f.Lists) {
+			f.Global.Concurrency = len(f.Lists)
+		}
+
+		fpath := f.Global.Path
+		if l.Path != "" {
+			fpath = l.Path
+		}
+
+		l.fpath = path.Join(path.Clean(fpath), l.FileName)
+
+		if st, err := os.Stat(l.fpath); err == nil {
+			l.updateTime = st.ModTime()
+		} else {
+			l.updateTime = unixTime
+		}
+
+		l.filterTable = &filterTable{
+			id:      &atomic.Uint32{},
+			domains: make([]map[string]struct{}, 2),
+			ips:     make([]map[string]struct{}, 2),
+		}
+
+		if len(l.SyntaxCommentBytes) == 0 {
+			l.SyntaxCommentBytes = syntaxCommentBytes
+		}
+
+		if l.SyntaxDetectLine <= 0 {
+			l.SyntaxDetectLine = syntaxDetectLine
+		}
+
+		if l.SyntaxDetectLineValid <= 0 {
+			l.SyntaxDetectLineValid = syntaxDetectLineValid
+		}
+
+		for i := 0; i < 2; i++ {
+			l.filterTable.domains[i] = make(map[string]struct{})
+			l.filterTable.ips[i] = make(map[string]struct{})
+		}
+
+		if err := l.detectFilterSyntaxParser(); err != nil {
+			libnamed.Logger.Error().Str("log_type", "filter").Str("op_type", "detect").Str("filter_name", ln).Err(err).Msg("failed to detect syntax parser")
+		}
+	}
+
+	runner.RegisterStartPre("filter_LoadLocalFilterFiles", func() error {
+
+		var err error
+		if f.Background {
+			go f.loadLocalFilterFiles()
+		} else {
+			err = f.loadLocalFilterFiles()
+		}
+		return err
+	})
+
+	runner.RegisterDaemon("filter_daemon_start", daemonStart, "filter_daemon_reload", daemonReload, "filter_daemon_stop", daemonStop)
+	return nil
+}
+
+// return: (filter_name, found)
+func (f *Filter) MatchDomain(domain string) (string, bool) {
+
+	for ln, l := range f.Lists {
+		if l.filterTable.matchDomain(domain) {
+			f.filterStats.update(domain, filterRuleTypeDomain, f.DisableStats)
+			return ln, true
+		}
+	}
+	return "", false
+}
+
+func (f *Filter) MatchIP(addr string) (string, bool) {
+
+	for ln, l := range f.Lists {
+		if l.filterTable.matchIP(addr) {
+			f.filterStats.update(addr, filterRuleTypeDomain, f.DisableStats)
+			return ln, true
+		}
+	}
+	return "", false
+}
+
+func (ft *filterTable) matchDomain(domain string) bool {
+	m := ft.domains[ft.id.Load()]
+	if len(m) == 0 {
+		m = ft.domains[ft.id.Load()]
+	}
+	_, found := m[domain]
+	return found
+}
+
+func (ft *filterTable) matchIP(addr string) bool {
+	m := ft.ips[ft.id.Load()]
+	if len(m) == 0 {
+		m = ft.ips[ft.id.Load()]
+	}
+	_, found := m[addr]
+	return found
+}
+
+type filterUpdateStats struct {
+	Total   uint32         `json:"total"`
+	Error   uint32         `json:"error"`
+	errCnt  *atomic.Uint32 `json:"-"`
+	Success uint32         `json:"success"`
+	okCnt   *atomic.Uint32 `json:"-"`
+	Skip    uint32         `json:"skip"`
+}
+
+func newFilterUpdateStats(total int) *filterUpdateStats {
+	fus := &filterUpdateStats{
+		Total:  uint32(total),
+		errCnt: &atomic.Uint32{},
+		okCnt:  &atomic.Uint32{},
+	}
+	return fus
+}
+
+func (fus *filterUpdateStats) update(err error) {
+	if err == nil {
+		fus.okCnt.Add(1)
+	} else {
+		fus.errCnt.Add(1)
 	}
 }
 
-// a deamon update filters in schedule
-func (f *Filter) deamon() {
-	interval, round := f.findRefreshSecond()
+func (fus *filterUpdateStats) marshal() []byte {
+	fus.Error = fus.errCnt.Load()
+	fus.Success = fus.okCnt.Load()
+	fus.Skip = fus.Total - fus.Success - fus.Error
 
-	f.daemonRunning = interval > 0
+	bs, err := json.Marshal(fus)
+	if err != nil {
+		return []byte("{}")
+	}
+	return bs
+}
 
-	if interval > 0 {
-		libnamed.Logger.Debug().Str("log_type", "filter").Msg("update filter's rule in configured refresh interval")
+func daemonStart() error {
+	cfg := GetGlobalConfig()
+	f := cfg.Filter
+	f.daemon()
+	return nil
+}
+
+func daemonReload() error {
+	cfg := GetGlobalConfig()
+	f := cfg.Filter
+	f.signalChan <- signalReload
+	return nil
+}
+
+func daemonStop() error {
+	cfg := GetGlobalConfig()
+	f := cfg.Filter
+	f.signalChan <- signalStop
+	return nil
+}
+
+func (f *Filter) daemon() {
+LabelReload:
+	if !f.daemonEnable {
+		return
 	}
 
-	curr := interval
+	finishChan := make(chan struct{})
 	go func() {
+		time.Sleep(f.Global.DelayDuration)
+		f.updateLocalFilterFiles()
+		finishChan <- struct{}{}
+	}()
 
-		// check filters that need to refresh at startup
-		k := 0
-		var wg *sync.WaitGroup = new(sync.WaitGroup)
-		for ln, lc := range f.Lists {
-			if lc.RefreshAtStartup {
-				k++
+	select {
+	case signalStr := <-f.signalChan:
+		if signalStr == signalReload {
+			f = GetGlobalConfig().Filter
+			goto LabelReload
+		} else {
+			return
+		}
+	case <-finishChan:
+		//
+	}
+
+	libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Dur("timer", f.timerDuration).Msg("start daemon to update filter in cycle")
+
+	d := f.timerDuration
+	t := time.NewTimer(d)
+	for {
+		logEvent := libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update")
+		start := time.Now()
+		stats := newFilterUpdateStats(len(f.Lists))
+
+		select {
+		case <-t.C:
+			var wg sync.WaitGroup
+			flying := make(chan struct{}, f.Global.Concurrency)
+			for ln, l := range f.Lists {
+				if l.RefreshDuration == 0 || time.Since(l.updateTime) < l.RefreshDuration {
+					libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Str("filter_name", ln).Str("syntax", l.Syntax).RawJSON("stats", l.stats.marshal()).Bool("updated", false).Msg("skip update due to configured update policy")
+					continue
+				}
 				wg.Add(1)
-				go func(k int, ln string, lc *FilterConfig) {
-					for i := 1; i <= 3; i++ {
-						time.Sleep(time.Duration(k%10) + time.Duration(i)*30*time.Second)
-						err := lc.UpdateFilter()
-						libnamed.Logger.Debug().Str("log_type", "filter").Str("name", ln).Str("op_type", "update_filter").Str("filename", lc.fpath).Err(err).Msg("refresh filter at startup")
+				flying <- struct{}{}
+				go func(ln string, fi *FilterInfo) {
+					var err error
+					for i := 0; i < 3; i++ {
+						start := time.Now()
+						err := fi.download()
+						libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Str("filter_name", ln).Str("syntax", fi.Syntax).RawJSON("stats", fi.stats.marshal()).Bool("updated", err == nil).Dur("elapsed_time", time.Since(start)).Err(err).Msg("")
 						if err == nil {
 							break
 						}
 					}
+					stats.update(err)
+					<-flying
 					wg.Done()
-				}(k, ln, f.Lists[ln])
+				}(ln, l)
+			}
+			wg.Wait()
+			logEvent.Dur("elapsed_time", time.Since(start)).RawJSON("stats", stats.marshal()).Msg("")
+			t.Reset(d)
+		case signalStr := <-f.signalChan:
+			if signalStr == signalReload {
+				t.Stop()
+				f = GetGlobalConfig().Filter
+				goto LabelReload
+			} else if signalStr == signalStop {
+				libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Msg("stop filter update daemon")
+				goto LabelExit
+			} else {
+				libnamed.Logger.Error().Str("log_type", "filter").Str("op_type", "update").Err(fmt.Errorf("receive unknow signal '%s'", signalStr)).Msg("stop filter update daemon")
+				goto LabelExit
 			}
 		}
-		wg.Wait()
-
-		if interval == 0 {
-			return
-		}
-
-		t := time.NewTicker(time.Duration(interval) * time.Second)
-		for {
-			select {
-			case <-t.C:
-				//
-			case <-f.stopChan:
-				// receive exit signal
-				libnamed.Logger.Debug().Str("log_type", "filter").Msg("receive signal, daemon exit")
-				return
-			}
-
-			cnt := 0
-			for ln, lc := range f.Lists {
-				secs := int(lc.refreshDuration.Seconds())
-				if secs > 0 && curr%secs == 0 {
-					cnt++
-					go func(cnt int, ln string, lc *FilterConfig) {
-						// cause the lc.refreshDurations might be very large, so, need to retry if failed
-						k := int(lc.refreshDuration.Seconds())/3600 - 1
-						if k <= 0 {
-							k = 1
-						}
-						for i := 0; i < k; i++ {
-							time.Sleep(time.Duration(cnt % 10))
-							err := lc.UpdateFilter()
-							logEvent := libnamed.Logger.Debug().Str("log_type", "filter").Str("name", ln).Str("op_type", "update_filter").Str("filename", lc.fpath).Err(err)
-							if i > 0 {
-								logEvent.Int("retry", i)
-							}
-							logEvent.Msg("")
-
-							if err == nil {
-								break
-							}
-							time.Sleep(time.Duration(i) * 30)
-						}
-					}(cnt, ln, f.Lists[ln])
-				}
-			}
-			if cnt > 0 {
-				libnamed.Logger.Debug().Str("log_type", "filter").Msgf("in this cycle the number of filter need to update is %d", cnt)
-			}
-			curr %= round
-			curr += interval
-		}
-	}()
+	}
+LabelExit:
+	t.Stop()
 }
 
-// (refershInterval, refershRound)
-func (f *Filter) findRefreshSecond() (int, int) {
-	interval, round := 0, 0
-	for _, fc := range f.Lists {
-		if fc.refreshDuration == 0 {
+func (f *Filter) updateLocalFilterFiles() error {
+
+	logEvent := libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update")
+
+	start := time.Now()
+
+	stats := newFilterUpdateStats(len(f.Lists))
+
+	var wg sync.WaitGroup
+
+	flying := make(chan struct{}, f.Global.Concurrency)
+	for ln, l := range f.Lists {
+		if !l.RefreshAtStartup && time.Since(l.updateTime) < l.RefreshDuration {
+			libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Str("filter_name", ln).Str("syntax", l.Syntax).RawJSON("stats", l.stats.marshal()).Bool("updated", false).Msg("skip update due to configured update policy")
 			continue
 		}
-		secs := int(fc.refreshDuration.Seconds())
-		if interval != 0 {
-			interval = gcd(interval, secs)
-			round = lcm(round, secs)
-		} else {
-			interval = secs
-			round = secs
+		wg.Add(1)
+		flying <- struct{}{}
+		go func(ln string, fi *FilterInfo) {
+			var err error
+			for i := 0; i < 3; i++ {
+				start := time.Now()
+				err = fi.download()
+				libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "update").Str("filter_name", ln).Str("syntax", fi.Syntax).RawJSON("stats", fi.stats.marshal()).Bool("updated", err == nil).Dur("elapsed_time", time.Since(start)).Err(err).Msg("")
+				if err == nil {
+					break
+				}
+			}
+			stats.update(err)
+			<-flying
+			wg.Done()
+		}(ln, l)
+	}
+	wg.Wait()
+	logEvent.Dur("elapsed_time", time.Since(start)).RawJSON("stats", stats.marshal()).Msg("")
+	return nil
+}
+
+func (f *Filter) loadLocalFilterFiles() error {
+
+	logEvent := libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "load")
+
+	start := time.Now()
+
+	stats := newFilterUpdateStats(len(f.Lists))
+
+	var wg sync.WaitGroup
+	for ln, l := range f.Lists {
+		wg.Add(1)
+		go func(ln string, fi *FilterInfo) {
+			start := time.Now()
+			err := fi.parse()
+			libnamed.Logger.Info().Str("log_type", "filter").Str("op_type", "load").Str("filter_name", ln).Str("syntax", fi.Syntax).RawJSON("stats", fi.stats.marshal()).Dur("elapsed_time", time.Since(start)).Err(err).Msg("")
+			stats.update(err)
+			wg.Done()
+		}(ln, l)
+	}
+	wg.Wait()
+	logEvent.Dur("elapsed_time", time.Since(start)).RawJSON("stats", stats.marshal()).Msg("")
+	return nil
+}
+
+type filterSyntaxParseStats struct {
+	Total   int `json:"total"`
+	Valid   int `json:"valid"`
+	Invalid int `json:"invalid"`
+}
+
+func (fsp *filterSyntaxParseStats) marshal() []byte {
+	bs, err := json.Marshal(fsp)
+	if err != nil {
+		return []byte("{}")
+	}
+
+	return bs
+}
+
+// error condition:
+// 1. filter filename not exist
+// 2. no valid filter
+func (fi *FilterInfo) parse() error {
+
+	fi.lock.Lock()
+	defer fi.lock.Unlock()
+
+	if fi.syntaxParserFunc == nil {
+		err := fi.detectFilterSyntaxParser()
+		if err != nil {
+			return err
 		}
 	}
-	return interval, round
-}
 
-func gcd(x, y int) int {
-	if x == 0 || y == 0 {
-		return 0
-	}
-	for x != 0 {
-		x, y = y%x, x
-	}
-
-	return y
-}
-
-func lcm(x, y int) int {
-	return x / gcd(x, y) * y
-}
-
-func (fc *FilterConfig) UpdateFilter() error {
-
-	// fetch filter
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(60*time.Second))
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fc.Url, nil)
+	fr, err := os.Open(fi.fpath)
 	if err != nil {
 		return err
 	}
-	req.Header.Add("Accept-Encoding", "gzip")
+	defer fr.Close()
+
+	ft := fi.filterTable
+	id := ft.id.Load()
+
+	sc := bufio.NewScanner(fr)
+
+	stats := &filterSyntaxParseStats{}
+
+	domains := make(map[string]struct{}, len(ft.domains[id]))
+	ips := make(map[string]struct{}, len(ft.ips[id]))
+	for i := 1; sc.Scan(); i++ {
+		rs, rt := fi.syntaxParserFunc(sc.Text())
+		if rt == "" {
+			continue
+		}
+
+		switch rt {
+		case filterRuleTypeDomain:
+			domains[rs] = struct{}{}
+		case filterRuleTypeIP:
+			ips[rs] = struct{}{}
+		default:
+			stats.Invalid++
+			continue
+		}
+
+		stats.Valid++
+	}
+	if stats.Valid < fi.SyntaxDetectLineValid {
+		return fmt.Errorf("file: %s hasn't any valid filter that can be parse by %v", fi.fpath, fi.Syntax)
+	}
+
+	oid := id
+	id ^= 1
+	ft.domains[id] = domains
+	ft.ips[id] = ips
+	ft.id.Store(id)
+
+	// release old objects
+	ft.domains[oid] = make(map[string]struct{})
+	ft.ips[oid] = make(map[string]struct{})
+
+	fi.updateTime = time.Now()
+	stats.Total = stats.Valid + stats.Invalid
+	fi.stats = stats
+
+	return nil
+}
+
+func (fc *FilterInfo) download() error {
+
+	logEvent := libnamed.Logger.Trace().Str("log_type", "filter").Str("op_type", "download").Str("url", fc.Url)
+	start := time.Now()
+	defer func() {
+		logEvent.Dur("elapsed_time", time.Since(start)).Msg("")
+	}()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(fc.TimeoutDuration))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fc.Url, nil)
+	logEvent.Err(err)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Add("Accept-Encoding", "deflate")
-	client := &http.Client{
+	req.Header.Add("Accept-Encoding", "br")
+
+	hc := &libnamed.HyperClient{
+		Timeout: fc.TimeoutDuration,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.Proto != "https" {
-				return fmt.Errorf("only https allow")
+			if len(via) > 1 {
+				return errors.New("429 too many redirect")
+			}
+			if req.URL.Scheme != "http" {
+				return errors.New("only https allowed")
 			}
 			return nil
 		},
+		DisableALPNCache: true,
 	}
-	resp, err := client.Do(req)
-	if err != nil || resp == nil || resp.StatusCode != 200 || resp.Body == nil {
-		return fmt.Errorf("invalid http response, error: %v", err)
+	resp, err := hc.Do(req)
+	logEvent.Err(err)
+	defer hc.CloseIdleConnections()
+	if err != nil {
+		return err
 	}
+	logEvent.Int("status_code", resp.StatusCode).Str("proto", resp.Proto)
+	if resp.StatusCode != 200 || resp.Body == nil {
+		return fmt.Errorf("invalid http response, status_code: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
 
 	// persist as temp file
-	tmpfpath := fc.fpath + "." + randStr + ".tmp"
+	oldfpath := fc.fpath
+	tmpfpath := fc.fpath + ".tmp"
 
 	fw, err := os.OpenFile(tmpfpath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
 	if err != nil {
@@ -275,370 +972,52 @@ func (fc *FilterConfig) UpdateFilter() error {
 	// make sure tmpfpath removed
 	defer func() {
 		fw.Close() // it's ok for double close fd
-		if fi, err := os.Stat(tmpfpath); os.IsExist(err) && fi.Mode().IsRegular() {
+		if fi, err := os.Stat(tmpfpath); (err == nil || os.IsExist(err)) && fi.Mode().IsRegular() {
 			err = os.Remove(tmpfpath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[+] failed to remove tmp file %s", tmpfpath)
 			}
 		}
+		fc.fpath = oldfpath
 	}()
 
 	rd := resp.Body
-	if !resp.Uncompressed {
+	if !resp.Uncompressed && resp.Header.Get("Content-Encoding") != "" {
 		ce := resp.Header.Get("Content-Encoding")
-		if strings.Contains(ce, "gzip") {
+		switch ce {
+		case "gzip":
 			if gziprd, err := gzip.NewReader(resp.Body); err == nil {
 				rd = gziprd
 			} else {
 				return err
 			}
-		} else if strings.Contains(ce, "deflate") {
+		case "br":
+			rd = io.NopCloser(brotli.NewReader(resp.Body))
+		case "deflate":
 			rd = flate.NewReader(resp.Body)
-		} else {
-			// unknow compress algorithm
+		default:
 			return fmt.Errorf("server sent http response wiht unknow compression algorithm %s", ce)
 		}
 	}
 	if _, err := io.Copy(fw, rd); err != nil {
-		//
+		logEvent.Err(err)
 		fw.Close()
 		return err
 	} else {
 		fw.Close()
 	}
-	rd.Close()
+	rd.Close() // compresser don't close the underlying io.Reader
 
 	// parse filter
-	oldpath := fc.fpath
 	fc.fpath = tmpfpath
-	if err := fc.Parse(); err != nil {
-		fc.fpath = oldpath
+
+	if err := fc.parse(); err != nil {
+		logEvent.Err(err)
 		return err
 	}
-	fc.fpath = oldpath
 
 	// update
-	if err := os.Rename(tmpfpath, oldpath); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (f *Filter) Parse() error {
-
-	// check default
-	if f.Default.Path == "" {
-		wd, err := os.Getwd()
-
-		if err != nil {
-			return err
-		}
-		f.Default.Path = wd
-	}
-	if f.Default.Parser == "" {
-		f.Default.Parser = ParserFuncNameDefault
-	} else {
-		good := false
-		for _, p := range allowFilterParser {
-			if p == f.Default.Parser {
-				good = true
-				break
-			}
-		}
-		if !good {
-			return fmt.Errorf("invalid filter parser, valid parsers are %v", allowFilterParser)
-		}
-	}
-
-	if f.Default.Refresh != "" {
-		d, err := time.ParseDuration(f.Default.Refresh)
-		if err != nil {
-			return err
-		}
-		f.Default.refreshDuration = d
-	}
-
-	// init internal using value
-	f.tables = make(map[string]*lookupTable)
-
-	// check lists
-	for ln, lc := range f.Lists {
-		if lc.Filename == "" {
-			return fmt.Errorf("invalid filter list, name: %s", ln)
-		}
-		fpath := lc.Path
-		if fpath == "" {
-			fpath = f.Default.Path
-		}
-
-		fpath = path.Clean(path.Join(fpath, lc.Filename))
-		// TODO: optional: for the sake of security, make sure under current working directory
-		//
-		if fi, err := os.Stat(fpath); err == nil {
-			if !fi.Mode().IsRegular() {
-				return fmt.Errorf("no such file: %s", fpath)
-			}
-			if fi.Mode().Perm()&0666 != 0666 {
-				return fmt.Errorf("don't have read and write permission for file %s", fpath)
-			}
-		} else {
-			return err
-		}
-
-		lc.fpath = fpath
-		if lc.Parser == "" {
-			lc.Parser = ParserFuncNameDefault
-		} else {
-			good := false
-			for _, p := range allowFilterParser {
-				if p == lc.Parser {
-					good = true
-					break
-				}
-			}
-			if !good {
-				return fmt.Errorf("invalid filter parser, valid parsers are %v", allowFilterParser)
-			}
-		}
-
-		if lc.Refresh != "" {
-			d, err := time.ParseDuration(lc.Refresh)
-			if err != nil {
-				return err
-			}
-			lc.refreshDuration = d
-		}
-
-		lt := &lookupTable{
-			lock: new(sync.RWMutex),
-		}
-		f.tables[ln] = lt
-		lc.lookupTable = lt
-		f.Lists[ln] = lc
-	}
-
-	f.stats = new(filterStats)
-
-	// parse filter list
-	if err := f.ParseFilter(); err != nil {
-		return err
-	}
-
-	f.stopChan = make(chan struct{})
-	f.deamon()
-	return nil
-}
-
-func (f *Filter) ParseFilter() error {
-
-	var err error
-	k := 0
-
-	f.stats.total.Store(0)
-	// if parse filter in background
-	// some query will be bypassed during sartup/reload.
-	var wg *sync.WaitGroup = new(sync.WaitGroup)
-	for ln, _ := range f.Lists {
-		k++
-		wg.Add(1)
-		go func(k int, lc *FilterConfig) {
-			time.Sleep(time.Duration(k%10) * time.Second)
-			if _err := lc.Parse(); _err != nil {
-				err = _err
-			}
-			wg.Done()
-			domainTotal := int64(len(lc.lookupTable.domains[int(lc.lookupTable.id.Load())]))
-			ipTotal := int64(len(lc.lookupTable.ips[int(lc.lookupTable.id.Load())]))
-			f.stats.domainTotal.Add(domainTotal)
-			f.stats.ipTotal.Add(ipTotal)
-			f.stats.total.Add(domainTotal + ipTotal)
-
-		}(k, f.Lists[ln])
-	}
-	if !f.Background {
-		wg.Wait()
-	}
-
+	err = os.Rename(tmpfpath, oldfpath)
+	logEvent.Err(err)
 	return err
-}
-
-func (fc *FilterConfig) Parse() error {
-	lt := fc.lookupTable
-
-	var err error
-	if pf, found := _pm[fc.Parser]; found {
-		p := pf()
-		p.setFileds(lt)
-		err = p.parse(fc.fpath)
-	} else {
-		p := _pm["default"]()
-		p.setFileds(lt)
-		err = p.parse(fc.fpath)
-	}
-
-	return err
-}
-
-func (f *Filter) MatchDomain(domain string) (string, bool) {
-	for listName, lt := range f.tables {
-		id := lt.id.Load()
-		if lt.domains[id][domain] {
-			f.stats.domainHit.Add(1)
-			return listName, true
-		}
-	}
-
-	return "", false
-}
-
-func (f *Filter) MatchIP(ip string) (string, bool) {
-	for listName, lt := range f.tables {
-		id := lt.id.Load()
-		if lt.ips[id][ip] {
-			f.stats.ipHit.Add(1)
-			return listName, true
-		}
-	}
-
-	return "", false
-}
-
-/*
-# Title: Online Malicious Domains Blocklist
-# Updated: 2023-03-09T12:11:51Z
-# Expires: 1 day (update frequency)
-# Homepage: https://gitlab.com/malware-filter/urlhaus-filter
-# License: https://gitlab.com/malware-filter/urlhaus-filter#license
-# Source: https://urlhaus.abuse.ch/api/
-1.2.3.4
-malware-domain.com
-*/
-type defaultParser struct {
-	lookupTable *lookupTable
-}
-
-func (dp *defaultParser) setFileds(lt *lookupTable) {
-	dp.lookupTable = lt
-}
-
-func (dp *defaultParser) parse(fname string) error {
-	dp.lookupTable.lock.Lock()
-	defer dp.lookupTable.lock.Unlock()
-	id := dp.lookupTable.id.Load() ^ 1
-
-	// clean all
-	dp.lookupTable.domains[id] = make(map[string]bool)
-	dp.lookupTable.ips[id] = make(map[string]bool)
-
-	domains, ips := dp.lookupTable.domains[id], dp.lookupTable.ips[id]
-
-	fr, err := os.Open(fname)
-	if err != nil {
-		return err
-	}
-	defer fr.Close()
-
-	errCnt := 0
-	sc := bufio.NewScanner(fr)
-	//sc.Split(bufio.ScanLines) // default
-	for i := 1; sc.Scan(); i++ {
-		line := strings.TrimSpace(sc.Text())
-		if len(line) < 3 || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		if sip := net.ParseIP(line); sip != nil && sip.String() == line {
-			ips[sip.String()] = true
-		} else if libnamed.ValidateDomain(line) {
-			domains[dns.Fqdn(line)] = true
-		} else {
-			// invalid
-			k := len(line)
-			if k > 23 {
-				k = 23
-			}
-			fmt.Fprintf(os.Stderr, "[+] invalid filter, filename: %s, line: %d, filter: %s\n", fname, i, line[:k])
-			errCnt++
-		}
-	}
-
-	// check
-	if len(domains) != 0 || len(ips) != 0 {
-		dp.lookupTable.id.Store(id)
-	} else if errCnt > 0 {
-		return fmt.Errorf("all filters are invalid")
-	}
-	return nil
-}
-
-/*
-! Title: Online Malicious URL Blocklist (AdGuard Home)
-! Updated: 2023-03-09T12:11:51Z
-! Expires: 1 day (update frequency)
-! Homepage: https://gitlab.com/malware-filter/urlhaus-filter
-! License: https://gitlab.com/malware-filter/urlhaus-filter#license
-! Source: https://urlhaus.abuse.ch/api/
-||1.2.3.4^
-||malware-domain.com^
-*/
-type aghParser struct {
-	lookupTable *lookupTable
-}
-
-func (ap *aghParser) setFileds(lt *lookupTable) {
-	ap.lookupTable = lt
-}
-
-func (ap *aghParser) parse(fname string) error {
-	ap.lookupTable.lock.Lock()
-	defer ap.lookupTable.lock.Unlock()
-	id := ap.lookupTable.id.Load() ^ 1
-
-	// always clean it
-	ap.lookupTable.domains[id] = make(map[string]bool)
-	ap.lookupTable.ips[id] = make(map[string]bool)
-
-	domains, ips := ap.lookupTable.domains[id], ap.lookupTable.ips[id]
-
-	fr, err := os.Open(fname)
-	if err != nil {
-		return err
-	}
-
-	defer fr.Close()
-
-	sc := bufio.NewScanner(fr)
-	//sc.Split(bufio.ScanLines) // default
-
-	// line format: ||<content>^
-	errCnt := 0
-	for i := 1; sc.Scan(); i++ {
-		line := strings.TrimSpace(sc.Text())
-		if len(line) < 3 || strings.HasPrefix(line, "!") {
-			continue
-		}
-
-		line = line[2 : len(line)-1]
-
-		if sip := net.ParseIP(line); sip != nil && sip.String() == line {
-			ips[sip.String()] = true
-		} else if libnamed.ValidateDomain(line) {
-			domains[dns.Fqdn(line)] = true
-		} else {
-			// invalid
-			k := len(line)
-			if k > 23 {
-				k = 23
-			}
-			fmt.Fprintf(os.Stderr, "[+] invalid filter, filename: %s, line: %d, filter: %s\n", fname, i, line[:k])
-			errCnt++
-		}
-	}
-
-	if len(domains) != 0 || len(ips) != 0 {
-		ap.lookupTable.id.Store(id)
-	} else if errCnt > 0 {
-		return fmt.Errorf("all filters are invalid")
-	}
-	return nil
 }

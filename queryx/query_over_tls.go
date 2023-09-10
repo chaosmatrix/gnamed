@@ -11,7 +11,7 @@ import (
 
 func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error) {
 
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
 
 	subEvent := dc.SubLog
 

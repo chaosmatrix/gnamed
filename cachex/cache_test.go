@@ -9,7 +9,16 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/miekg/dns"
 )
+
+func newTestMsgWithString(s string) *dns.Msg {
+	msg := new(dns.Msg)
+	msg.SetQuestion(s, dns.TypeA)
+
+	return msg
+}
 
 func TestSklCache(t *testing.T) {
 
@@ -21,7 +30,7 @@ func TestSklCache(t *testing.T) {
 	type testEntry struct {
 		domain string
 		qtype  uint16
-		vals   []byte
+		vals   *dns.Msg
 		ttl    uint32
 		ts     int64
 	}
@@ -39,63 +48,63 @@ func TestSklCache(t *testing.T) {
 		{
 			domain: "example.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    300,
 			ts:     now + 300,
 		},
 		{
 			domain: "www.example.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    300,
 			ts:     now + 300,
 		},
 		{
 			domain: "www1.example.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    60,
 			ts:     now + 60,
 		},
 		{
 			domain: "google.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    600,
 			ts:     now + 600,
 		},
 		{
 			domain: "www1.google.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    600,
 			ts:     now + 600,
 		},
 		{
 			domain: "www2.google.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    900,
 			ts:     now + 900,
 		},
 		{
 			domain: "www.google.com",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    600,
 			ts:     now + 600,
 		},
 		{
 			domain: "localhost",
 			qtype:  5,
-			vals:   []byte("1"),
+			vals:   newTestMsgWithString("1"),
 			ttl:    900,
 			ts:     now + 900,
 		},
 	}
 
 	// should be updated
-	sklc.Set("google.com", 5, []byte("3"), 900)
+	sklc.Set("google.com", 5, newTestMsgWithString("3"), 900)
 
 	for _, te := range tes {
 		sklc.Set(te.domain, te.qtype, te.vals, te.ttl)
@@ -109,14 +118,14 @@ func TestSklCache(t *testing.T) {
 	fmt.Printf("[+] show tables\n")
 	fmt.Printf("%v\n", sklc.tables[tes[0].qtype].table)
 	/*
-		sklc.Set("example.com", 5, []byte("1"), 300)
-		sklc.Set("www.example.com", 5, []byte("2"), 300)
-		sklc.Set("www1.example.com", 5, []byte("2"), 500)
+		sklc.Set("example.com", 5, newTestMsgWithString("1"), 300)
+		sklc.Set("www.example.com", 5, newTestMsgWithString("2"), 300)
+		sklc.Set("www1.example.com", 5, newTestMsgWithString("2"), 500)
 		ts := time.Now().Unix() + 200
 
-		sklc.Set("www.google.com", 5, []byte("2"), 600)
-		sklc.Set("google.com", 5, []byte("2"), 600)
-		sklc.Set("google.com", 5, []byte("3"), 900)
+		sklc.Set("www.google.com", 5, newTestMsgWithString("2"), 600)
+		sklc.Set("google.com", 5, newTestMsgWithString("2"), 600)
+		sklc.Set("google.com", 5, newTestMsgWithString("3"), 900)
 		//fmt.Printf("%v %v\n", sklc.skls[5].Head.Level[0].Value, sklc.skls[5].Head.Level[0].vals)
 		//fmt.Printf("%v %v\n", sklc.skls[5].Head.Level[0].Level[0].Value, sklc.skls[5].Head.Level[0].Level[0].vals)
 	*/
@@ -199,6 +208,8 @@ func TestSklCache(t *testing.T) {
 
 	}
 
+	fmt.Printf("%v\n", sklc.Dump())
+
 	fakeTimer.Stop()
 }
 
@@ -209,7 +220,7 @@ func TestSklCacheRandom(t *testing.T) {
 	sklc := newSklCache(32, 0.5)
 
 	for i := 300; i < size; i++ {
-		ok := sklc.Set(strconv.Itoa(i), uint16(i%32+3), []byte{byte(i)}, uint32(i&math.MaxUint32))
+		ok := sklc.Set(strconv.Itoa(i), uint16(i%32+3), newTestMsgWithString(strconv.Itoa(i)), uint32(i&math.MaxUint32))
 		if !ok {
 			t.Errorf("[+] bug: insert key '%d'\n", i)
 		}
@@ -230,7 +241,7 @@ func TestSklCacheRandom(t *testing.T) {
 		val, _, found := sklc.Get(strconv.Itoa(i), uint16(i%32+3))
 
 		if found {
-			if i%removePercent == 0 || len(val) == 0 || val[0] != byte(i) {
+			if i%removePercent == 0 || val == nil || val.Question[0].Name != strconv.Itoa(i) {
 				t.Errorf("[+] bug: key '%d' exist, but not found\n", i)
 			}
 		} else {
@@ -247,11 +258,11 @@ func BenchmarkSklCacheInsert(b *testing.B) {
 	sklc := newSklCache(32, 0.5)
 
 	for i := 300; i < b.N; i++ {
-		sklc.Set(strconv.Itoa(i), 1, []byte{byte(i)}, uint32(i&math.MaxUint32))
+		sklc.Set(strconv.Itoa(i), 1, newTestMsgWithString(strconv.Itoa(i)), uint32(i&math.MaxUint32))
 	}
 
 	for i := 300; i < b.N; i++ {
-		if val, _, found := sklc.Get(strconv.Itoa(i), 1); !found || val[0] != byte(i) {
+		if val, _, found := sklc.Get(strconv.Itoa(i), 1); !found || val.Question[0].Name != strconv.Itoa(i) {
 			fmt.Printf("[+] bug: SklCache get key '%d' val '%v' success '%v'\n", i, val, found)
 		}
 	}
@@ -273,5 +284,48 @@ func BenchmarkSkl(b *testing.B) {
 		if node, found := skl.Get(int64(i)); !found || uint32(node.value) != uint32(i&math.MaxUint32) {
 			fmt.Printf("[+] bug: SkipList get %d\n", i)
 		}
+	}
+}
+
+func newTestMsg() *dns.Msg {
+	msg := new(dns.Msg)
+	msg.SetQuestion("bing.com.", dns.TypeA)
+
+	rss := []string{
+		"bing.com.               60       IN      A       13.107.21.200",
+		"bing.com.               60       IN      A       204.79.197.200",
+	}
+	for _, rs := range rss {
+		rr, _ := dns.NewRR(rs)
+		msg.Answer = append(msg.Answer, rr)
+	}
+	return msg
+}
+
+// Pack() == Copy() == 1/3 * Unpack()
+// Pack() && Unpack() increase When msg size increase
+func BenchmarkMsgPack(b *testing.B) {
+	msg := newTestMsg()
+
+	for i := 0; i < b.N; i++ {
+		msg.Pack()
+	}
+}
+
+func BenchmarkMsgUnpack(b *testing.B) {
+	msg := newTestMsg()
+	bmsg, err := msg.Pack()
+	if err != nil {
+		panic(err)
+	}
+	for i := 0; i < b.N; i++ {
+		msg.Unpack(bmsg)
+	}
+}
+
+func BenchmarkMsgCopy(b *testing.B) {
+	msg := newTestMsg()
+	for i := 0; i < b.N; i++ {
+		msg.Copy()
 	}
 }

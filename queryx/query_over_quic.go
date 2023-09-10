@@ -19,7 +19,7 @@ import (
 // 1. reuse connection
 // 2. group more querys into one connection, use different stream
 func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error) {
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
 
 	oId := r.Id
 	r.Id = 0
@@ -36,7 +36,7 @@ func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error
 		subEvent.Dur("lantancy", time.Since(start))
 	}()
 
-	qconn, err := quic.DialAddr(doq.Server, doq.TlsConf, doq.QuicConf)
+	qconn, err := quic.DialAddr(context.TODO(), doq.Server, doq.TlsConf, doq.QuicConf)
 	if err != nil {
 		subEvent.Err(err)
 		return nil, err

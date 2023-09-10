@@ -4,23 +4,30 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/miekg/dns"
 )
 
 type Element struct {
-	key        string
-	qtype      uint16
-	value      []byte
-	expiredUTC int64
+	key   string
+	qtype uint16
+	//value      []byte
+	value        *dns.Msg
+	extraElement *extraElement
+	expiredUTC   int64
+	reads        *atomic.Uint64 // cache hit count
 }
 
 type Elements struct {
-	element map[string]Element
+	element map[string]*Element
 	lock    *sync.RWMutex
 }
 
 type Cache struct {
 	// qtype -> len(key) % mod -> {key: element}
-	cache [][]Elements
+	cache [][]*Elements
 }
 
 func NewDefaultHashCache() {
@@ -28,6 +35,11 @@ func NewDefaultHashCache() {
 }
 
 func NewHashCache(slots int) *Cache {
+	if slots < 256 {
+		slots = 256
+	} else if slots > 65536 {
+		slots = 65536
+	}
 	return newHashCache(slots)
 }
 
@@ -35,12 +47,12 @@ func newHashCache(slots int) *Cache {
 
 	libnamed.Logger.Trace().Str("log_type", "cache").Str("cache_mode", configx.CacheModeHashTable).Int("slots", slots).Msg("")
 
-	cache := make([][]Elements, slots)
+	cache := make([][]*Elements, slots)
 	for _i := range cache {
-		ems := make([]Elements, 8)
+		ems := make([]*Elements, 8)
 		for _j := range ems {
-			ems[_j] = Elements{
-				element: make(map[string]Element),
+			ems[_j] = &Elements{
+				element: make(map[string]*Element),
 				lock:    new(sync.RWMutex),
 			}
 		}
@@ -54,28 +66,32 @@ func newHashCache(slots int) *Cache {
 	Get = c.Get
 	Set = c.Set
 	Remove = c.Remove
+	Dump = c.Dump
+	Store = c.Store
 
 	return c
 }
 
-func (c *Cache) Get(key string, qtype uint16) ([]byte, int64, bool) {
+func (c *Cache) Get(key string, qtype uint16) (*dns.Msg, int64, bool) {
 	i := int(qtype) % len(c.cache)
 	j := len(key) % len(c.cache[0])
 
 	c.cache[i][j].lock.RLock()
 	if e, _found := c.cache[i][j].element[key]; _found {
 
+		val := e.value
+		e.reads.Add(1)
 		if libnamed.GetFakeTimerUnixSecond() > e.expiredUTC {
 			c.cache[i][j].lock.RUnlock()
 			c.Remove(key, qtype)
-			return []byte{}, e.expiredUTC, false
+			return val.Copy(), e.expiredUTC, false
 		}
 
 		defer c.cache[i][j].lock.RUnlock()
-		return e.value, e.expiredUTC, true
+		return val.Copy(), e.expiredUTC, true
 	}
 	c.cache[i][j].lock.RUnlock()
-	return []byte{}, 0, false
+	return nil, 0, false
 }
 
 func (c *Cache) Remove(key string, qtype uint16) bool {
@@ -88,18 +104,84 @@ func (c *Cache) Remove(key string, qtype uint16) bool {
 	return true
 }
 
-func (c *Cache) Set(key string, qtype uint16, value []byte, ttl uint32) bool {
+func (c *Cache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) bool {
+
+	value = value.Copy()
+
 	i := int(qtype) % len(c.cache)
 	j := len(key) % len(c.cache[0])
 
-	element := Element{
+	reads := &atomic.Uint64{}
+	reads.Store(1)
+	element := &Element{
 		key:        key,
 		qtype:      qtype,
 		value:      value,
 		expiredUTC: libnamed.GetFakeTimerUnixSecond() + int64(ttl),
+		reads:      reads,
 	}
 	c.cache[i][j].lock.Lock()
 	c.cache[i][j].element[key] = element
 	c.cache[i][j].lock.Unlock()
 	return true
+}
+
+func (c *Cache) Dump() map[string][]uint16 {
+	res := make(map[string][]uint16)
+
+	for _, eless := range c.cache {
+		if eless == nil {
+			continue
+		}
+		for _, eles := range eless {
+			eles.lock.RLock()
+			for qname, ele := range eles.element {
+				if res[qname] == nil {
+					res[qname] = []uint16{}
+				}
+				res[qname] = append(res[qname], ele.qtype)
+
+			}
+			eles.lock.RUnlock()
+		}
+	}
+	return res
+}
+
+func (c *Cache) Store() *configx.WarmFormat {
+	wf := new(configx.WarmFormat)
+	wf.Start = time.Now()
+
+	if wf.Elements == nil {
+		wf.Elements = make(map[string]map[uint16]*configx.WarmElement, 3072)
+	}
+
+	wfe := wf.Elements
+	for _, eless := range c.cache {
+		if eless == nil {
+			continue
+		}
+		for _, eles := range eless {
+			eles.lock.RLock()
+			for qname, ele := range eles.element {
+				if ele.extraElement == nil {
+					ele.extraElement = &extraElement{
+						Country: libnamed.GetCountryIsoCodeFromMsg(ele.value),
+					}
+				}
+				if wfe[qname] == nil {
+					wfe[qname] = make(map[uint16]*configx.WarmElement, 2)
+				}
+				nwe := &configx.WarmElement{
+					Type:      uint16(ele.qtype),
+					Frequency: int(ele.reads.Load()),
+					Rcode:     ele.value.Rcode,
+					Country:   ele.extraElement.Country,
+				}
+				wfe[qname][ele.qtype] = nwe
+			}
+			eles.lock.RUnlock()
+		}
+	}
+	return wf
 }

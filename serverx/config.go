@@ -1,11 +1,6 @@
 package serverx
 
-import (
-	"gnamed/configx"
-	"sync"
-	"time"
-)
-
+/*
 var defaultServerConfig *serverConfig
 
 type serverConfig struct {
@@ -18,6 +13,7 @@ func initDefaultServerConfig(cfg *configx.Config) {
 		cfg: cfg,
 	}
 }
+
 func getGlobalConfig() *configx.Config {
 	return defaultServerConfig.cfg
 }
@@ -32,8 +28,6 @@ func updateGlobalConfig() (*configx.Config, error) {
 	defaultServerConfig.lock.Lock()
 	defer defaultServerConfig.lock.Unlock()
 
-	defaultServerConfig.cfg.StopDaemon()
-
 	fname := defaultServerConfig.cfg.GetFileName()
 	cfg, err := configx.ParseConfig(fname)
 	if err != nil {
@@ -45,3 +39,4 @@ func updateGlobalConfig() (*configx.Config, error) {
 
 	return cfg, err
 }
+*/

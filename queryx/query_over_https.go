@@ -9,7 +9,7 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"io"
-	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +23,39 @@ var (
 	ErrDoHServerRefused = errors.New("doh server response status_code 403")
 	ErrDoHServerFailure = errors.New("doh server response status_code not 2xx")
 )
+
+// against fingerprint
+func setRequestHeader(req *http.Request) {
+	rv := rand.Int() & 7
+	switch rv {
+	case 0, 7:
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Accept-Language", "en-US")
+		req.Header.Add("Accept-Language", "en;q=0.9")
+		req.Header.Set("Dnt", "1")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+	case 1, 6:
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Accept-Language", "en-US")
+		req.Header.Add("Accept-Language", "en;q=0.5")
+		req.Header.Set("DNT", "1")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+	case 2, 5:
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Accept-Language", "en-US")
+		req.Header.Add("Accept-Language", "en;q=0.5")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36")
+	default:
+	}
+}
+
+func clientDo(doh *configx.DOHServer, req *http.Request) (*http.Response, error) {
+	setRequestHeader(req)
+	return doh.GetClient().Do(req)
+}
 
 // Google Json
 // curl --request GET --header "Accept: application/dns-json" "https://dns.google.com/resolve?name=www.google.com&type=a"
@@ -63,14 +96,14 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event) (
 		req.Header.Set("Accept", configx.DOHAcceptHeaderTypeJSON)
 	}
 
-	resp, err := doh.Client.Do(req)
+	resp, err := clientDo(doh, req)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 	defer resp.Body.Close()
 
-	logEvent.Int("status_code", resp.StatusCode)
+	logEvent.Int("status_code", resp.StatusCode).Str("http_version", resp.Proto)
 	if resp.StatusCode == http.StatusForbidden {
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
@@ -78,7 +111,7 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event) (
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, ErrDoHServerFailure
 	}
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
@@ -187,14 +220,14 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 		req.Header.Set("Content-Type", configx.DOHAccetpHeaderTypeRFC8484)
 	}
 
-	resp, err := doh.Client.Do(req)
+	resp, err := clientDo(doh, req)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
 	defer resp.Body.Close()
 
-	logEvent.Int("status_code", resp.StatusCode)
+	logEvent.Int("status_code", resp.StatusCode).Str("http_version", resp.Proto)
 	if resp.StatusCode == http.StatusForbidden {
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
@@ -203,7 +236,7 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 		return rmsg, ErrDoHServerFailure
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
@@ -218,7 +251,7 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 
 func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error) {
 
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
 	subEvent := dc.SubLog
 
 	oId := r.Id

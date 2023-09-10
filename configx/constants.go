@@ -13,10 +13,6 @@ const (
 	ProtocolTypeDoT = "tls-tcp"
 	ProtocolTypeDoQ = "quic"
 
-	// TODO
-	cachePassiveEvict = false // evict expired element while get element
-	cacheActiveEvict  = false // skiplist - while add new element, evict first two expired elements & evict the getting expired element
-
 	CacheModeSkipList  = "skiplist"
 	CacheModeHashTable = "hashtable"
 
@@ -49,5 +45,5 @@ var (
 
 	// RrHTTPS
 	// https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids
-	defaultRrHTTPSAlpn = []string{"h3", "h2", "spdy/3", "spdy/2", "spdy/1", "http/1.1"}
+	defaultRrHTTPSAlpn = []string{"h3", "h2", "http/1.1"}
 )
