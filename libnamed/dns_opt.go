@@ -13,7 +13,6 @@ type OPTOption struct {
 	SourceIP      net.IP // Source IP Address
 	Family        uint16
 	SourceNetmask uint8 // Source Netmask 8 ~ 32
-	SourceScope   uint8 // Desire return netmask
 }
 
 func SetOpt(r *dns.Msg, o *OPTOption) {
@@ -31,11 +30,10 @@ func SetOpt(r *dns.Msg, o *OPTOption) {
 		ecs := new(dns.EDNS0_SUBNET)
 
 		ecs.Address = o.SourceIP
-		ecs.Family = 1
+		ecs.Family = o.Family
 		ecs.Code = dns.EDNS0SUBNET
 
 		ecs.SourceNetmask = o.SourceNetmask
-		ecs.SourceScope = o.SourceScope
 
 		opt.Option = append(opt.Option, ecs)
 	}

@@ -9,11 +9,12 @@ import (
 	"gnamed/configx"
 	"gnamed/libnamed"
 	"gnamed/queryx"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ type AdminResponse struct {
 
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := getGlobalConfig()
+		cfg := configx.GetGlobalConfig()
 
 		if len(cfg.Admin.Auth.Cidr) == 0 && len(cfg.Admin.Auth.Token) == 0 {
 			return
@@ -91,7 +92,7 @@ func LoggerMiddleware() gin.HandlerFunc {
 
 		start := time.Now()
 
-		logEvent := libnamed.Logger.Debug().Str("log_type", "admin")
+		logEvent := libnamed.Logger.Info().Str("log_type", "admin")
 
 		clientIP := c.ClientIP()
 		logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
@@ -119,13 +120,25 @@ func LoggerMiddleware() gin.HandlerFunc {
 
 // /stats/filter
 func handleRequestAdminStats(c *gin.Context) {
-	cfg := getGlobalConfig()
-	c.JSON(http.StatusOK, cfg.Filter.GetStats())
+	cfg := configx.GetGlobalConfig()
+	c.String(http.StatusOK, cfg.Filter.GetStats())
+}
+
+// /filter/show/?name=<filter_name>
+func handleRequestAdminFilterShow(c *gin.Context) {
+	name := c.Query("name")
+	if len(name) == 0 {
+		c.String(http.StatusBadRequest, "{\"message\": \"no valid filter name\"}")
+		return
+	}
+
+	cfg := configx.GetGlobalConfig()
+	c.String(http.StatusOK, cfg.Filter.MarshalFilter(name))
 }
 
 // /config/reload
 // need rate limit
-func handleRequestAdminConfig(c *gin.Context) {
+func (srv *ServerMux) handleRequestAdminConfig(c *gin.Context) {
 
 	if c.Request.Method != "GET" && c.Request.Method != "POST" {
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
@@ -139,7 +152,7 @@ func handleRequestAdminConfig(c *gin.Context) {
 
 	switch action {
 	case "reload":
-		cfg := getGlobalConfig()
+		cfg := configx.GetGlobalConfig()
 		lastTimestamp := cfg.GetTimestamp()
 
 		// rate limit
@@ -153,7 +166,7 @@ func handleRequestAdminConfig(c *gin.Context) {
 				Msg:    "",
 			})
 		} else {
-			_, err := updateGlobalConfig()
+			err := srv.Reload()
 			c.Keys["log_error"] = err
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, AdminResponse{
@@ -162,7 +175,7 @@ func handleRequestAdminConfig(c *gin.Context) {
 					Msg:    "",
 				})
 			} else {
-				cfg = getGlobalConfig()
+				cfg = configx.GetGlobalConfig()
 				currTimestamp := cfg.GetTimestamp()
 				c.JSON(http.StatusOK, AdminResponse{
 					Status: 0,
@@ -203,6 +216,10 @@ func handleRequestAdminCache(c *gin.Context) {
 		handleRequestAdminCacheDelete(c, name, qtype)
 	case "show":
 		handleRequestAdminCacheShow(c, name, qtype)
+	case "dump":
+		handleRequestAdminCacheDump(c)
+	case "store":
+		handleRequestAdminCacheStore(c)
 	default:
 		c.JSON(http.StatusBadRequest, AdminResponse{
 			Status: 1,
@@ -216,17 +233,9 @@ func handleRequestAdminCache(c *gin.Context) {
 // GET /cache/show?name=<domain>&type=<type_str>
 func handleRequestAdminCacheShow(c *gin.Context, name string, qtype string) {
 
-	if bmsg, expiredUTC, found := cachex.Get(name, dns.StringToType[qtype]); found {
-		rmsg := new(dns.Msg)
-		if err := rmsg.Unpack(bmsg); err != nil {
-			c.JSON(http.StatusInternalServerError, AdminResponse{
-				Status: 1,
-				Desc:   "cache founded, but msg unpack failed",
-				Msg:    "",
-			})
-			return
-		}
-		cacheTtl := queryx.GetMsgTTL(rmsg, &getGlobalConfig().Server.RrCache)
+	if rmsg, expiredUTC, found := cachex.Get(name, dns.StringToType[qtype]); found {
+
+		cacheTtl := queryx.GetMsgTTL(rmsg, &configx.GetGlobalConfig().Server.RrCache)
 		expiredTime := time.Unix(expiredUTC, 0).String()
 		addTime := time.Unix(expiredUTC-int64(cacheTtl), 0)
 
@@ -259,21 +268,75 @@ func handleRequestAdminCacheDelete(c *gin.Context, name string, qtype string) {
 	}
 }
 
+// GET /cache/dump
+func handleRequestAdminCacheDump(c *gin.Context) {
+
+	format := c.Query("format")
+	c.Keys["log_format"] = format
+
+	res := cachex.Dump()
+	switch format {
+	case "txt":
+		arr := make([]string, len(res))
+		i := 0
+		for qname, qtypes := range res {
+			tmp := qname
+			for _, qtype := range qtypes {
+				tmp += "," + dns.TypeToString[qtype]
+			}
+			arr[i] = tmp
+			i++
+		}
+		//sort.Strings(arr)
+		sort.Slice(arr, func(i, j int) bool {
+			sizei, sizej := strings.Index(arr[i], ","), strings.Index(arr[j], ",")
+
+			for ir, jr := sizei-1, sizej-1; ir >= 0 && jr >= 0; ir, jr = ir-1, jr-1 {
+				if arr[i][ir] < arr[j][jr] {
+					return true
+				} else if arr[i][ir] > arr[j][jr] {
+					return false
+				}
+			}
+			return sizei < sizej
+		})
+		c.String(http.StatusOK, "%s", strings.Join(arr, "\n"))
+	default:
+		c.JSON(http.StatusOK, res)
+	}
+}
+
+// GET /cache/store
+func handleRequestAdminCacheStore(c *gin.Context) {
+	wf := cachex.Store()
+	wri := configx.GetGlobalConfig().WarmRunnerInfo
+	err := wri.Store(wf)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v\n", err))
+	} else {
+		c.String(http.StatusOK, "success store cache as file\n")
+	}
+}
+
 func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		//serveAdminFunc(listen)
 		// r = gin.Default()
 		// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
+		gin.SetMode(gin.ReleaseMode)
+
+		v := os.Getenv(envGinDisableLog)
+		if v != "" {
+			gin.DefaultWriter = io.Discard
+			//gin.DefaultErrorWriter = ioutil.Discard
+		}
 		r := gin.New()
-		if os.Getenv(envGinDisableLog) == "" {
+		if v == "" {
 			r.Use(gin.Logger(), gin.Recovery())
 		} else {
 			r.Use(gin.Recovery())
-			gin.DefaultWriter = ioutil.Discard
-			//gin.DefaultErrorWriter = ioutil.Discard
 		}
-		//gin.SetMode(gin.ReleaseMode)
 
 		r.Use(LoggerMiddleware())
 		r.Use(AuthMiddleware())
@@ -283,12 +346,16 @@ func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 		r.POST(cachePath, handleRequestAdminCache)
 
 		configPath := path.Join(listen.DohPath, "/config/:action")
-		r.GET(configPath, handleRequestAdminConfig)
-		r.POST(configPath, handleRequestAdminConfig)
+		r.GET(configPath, srv.handleRequestAdminConfig)
+		r.POST(configPath, srv.handleRequestAdminConfig)
 
 		statsFilterPath := path.Join(listen.DohPath, "/stats/filter")
 		r.GET(statsFilterPath, handleRequestAdminStats)
 		r.POST(statsFilterPath, handleRequestAdminStats)
+
+		filterShowPath := path.Join(listen.DohPath, "/filter/show")
+		r.GET(filterShowPath, handleRequestAdminFilterShow)
+		r.POST(filterShowPath, handleRequestAdminFilterShow)
 
 		httpSrv := &http.Server{
 			Addr:         listen.Addr,
@@ -299,9 +366,9 @@ func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
 		}
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			libnamed.Logger.Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
-			logEvent := libnamed.Logger.Debug().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := libnamed.Logger.Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")

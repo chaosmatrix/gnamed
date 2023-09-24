@@ -6,6 +6,7 @@ import (
 	"gnamed/libnamed"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -16,9 +17,10 @@ func NewDefaultSklCache() {
 }
 
 type SklCache struct {
-	lock        *sync.Mutex // lock for lazy init
-	maxLevel    int         // skiplist maxlevel
-	probability float64     // skiplist probability
+	lock        *sync.Mutex   // lock for lazy init
+	maxLevel    int           // skiplist maxlevel
+	probability float64       // skiplist probability
+	count       *atomic.Int64 // total count
 
 	// qtype -> SklTable
 	tables []*SklTable // 1<<16
@@ -33,7 +35,10 @@ type SklTable struct {
 
 type TableNode struct {
 	sklNode *SkipListNode // SkipListNode.vals and SkipListNode.value to evict expired keys
-	val     []byte        // dns.Msg
+	//val     []byte        // dns.Msg
+	val          *dns.Msg
+	extraElement *extraElement  // extra element
+	reads        *atomic.Uint64 // cache hit count
 }
 
 func NewSklCache(maxLevel int, probability float64) *SklCache {
@@ -52,6 +57,7 @@ func newSklCache(maxLevel int, probability float64) *SklCache {
 		lock:        new(sync.Mutex),
 		maxLevel:    maxLevel,
 		probability: probability,
+		count:       new(atomic.Int64),
 
 		tables: tables,
 		skls:   skls,
@@ -66,6 +72,8 @@ func newSklCache(maxLevel int, probability float64) *SklCache {
 	Get = sklCache.Get
 	Set = sklCache.Set
 	Remove = sklCache.Remove
+	Dump = sklCache.Dump
+	Store = sklCache.Store
 
 	return sklCache
 }
@@ -94,7 +102,7 @@ func (sklc *SklCache) lazyInit(qtype uint16) {
 }
 
 // O(1)
-func (sklc *SklCache) Get(key string, qtype uint16) ([]byte, int64, bool) {
+func (sklc *SklCache) Get(key string, qtype uint16) (*dns.Msg, int64, bool) {
 	// lazy init
 	sklc.lazyInit(qtype)
 
@@ -103,6 +111,7 @@ func (sklc *SklCache) Get(key string, qtype uint16) ([]byte, int64, bool) {
 	if tnode, found := sklt.table[key]; found {
 		val := tnode.val
 		expiredUTC := tnode.sklNode.value
+		tnode.reads.Add(1)
 
 		sklt.lock.RUnlock()
 
@@ -113,17 +122,20 @@ func (sklc *SklCache) Get(key string, qtype uint16) ([]byte, int64, bool) {
 			// steal cache, let caller determine using or not
 			return val, expiredUTC, false
 		}
-		return val, expiredUTC, true
+		return val.Copy(), expiredUTC, true
 	}
 
 	sklt.lock.RUnlock()
 
-	return []byte{}, 0, false
+	return nil, 0, false
 }
 
 // update: O(1)
 // Insert: O(logN)
-func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bool {
+func (sklc *SklCache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) bool {
+	// make sure deep-copy
+	value = value.Copy()
+
 	// lazy init
 	sklc.lazyInit(qtype)
 
@@ -147,6 +159,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 			if len(curr.forward[0].vals) <= 2 {
 				for k := range curr.forward[0].vals {
 					delete(sklt.table, k)
+					sklc.count.Add(-1)
 				}
 				skll.Erase(curr.forward[0].value)
 			} else {
@@ -161,6 +174,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 						break
 					}
 				}
+				sklc.count.Add(-2)
 			}
 		}
 	}
@@ -176,9 +190,14 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 		delete(oldTNode.sklNode.vals, key)
 		if len(oldTNode.sklNode.vals) == 0 {
 			skll.Erase(oldTNode.sklNode.value)
+			sklc.count.Add(-1)
 		}
 	}
 
+	sklc.count.Add(1)
+
+	reads := &atomic.Uint64{}
+	reads.Store(1)
 	// check expireSecond match skipListNode exist or not
 	if node, found := skll.Get(expiredUTC); found {
 		// add new key
@@ -187,6 +206,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 		sklt.table[key] = &TableNode{
 			val:     value,
 			sklNode: node,
+			reads:   reads,
 		}
 		return true
 	}
@@ -196,6 +216,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value []byte, ttl uint32) bo
 	sklt.table[key] = &TableNode{
 		val:     value,
 		sklNode: node,
+		reads:   reads,
 	}
 
 	return true
@@ -228,10 +249,69 @@ func (sklc *SklCache) Remove(key string, qtype uint16) bool {
 			skll.Erase(tnode.sklNode.value)
 		}
 
+		sklc.count.Add(-1)
 		skll.lock.Unlock()
 		return true
 	}
 	return false
+}
+
+func (sklc *SklCache) Dump() map[string][]uint16 {
+	res := make(map[string][]uint16)
+
+	for qtype, table := range sklc.tables {
+		if table == nil {
+			continue
+		}
+		table.lock.RLock()
+		for qname := range table.table {
+			if res[qname] == nil {
+				res[qname] = []uint16{}
+			}
+			res[qname] = append(res[qname], uint16(qtype))
+		}
+		table.lock.RUnlock()
+	}
+	return res
+}
+
+// 2500 ~ 25ms
+// 2500 ~ 12ms (range cache)
+// 2500 ~ 12ms (geo)
+func (sklc *SklCache) Store() *configx.WarmFormat {
+	wf := new(configx.WarmFormat)
+	if wf.Elements == nil {
+		wf.Elements = make(map[string]map[uint16]*configx.WarmElement, sklc.count.Load()+131)
+	}
+	wfe := wf.Elements
+	wf.Start = time.Now()
+
+	for qtype, table := range sklc.tables {
+		if table == nil {
+			continue
+		}
+		table.lock.RLock()
+		for qname, tnode := range table.table {
+
+			if wfe[qname] == nil {
+				wfe[qname] = make(map[uint16]*configx.WarmElement, 2)
+			}
+			nwe := &configx.WarmElement{
+				Type:      uint16(qtype),
+				Frequency: int(tnode.reads.Load()),
+			}
+			if tnode.extraElement == nil {
+				tnode.extraElement = &extraElement{
+					Country: libnamed.GetCountryIsoCodeFromMsg(tnode.val),
+				}
+			}
+			nwe.Country = tnode.extraElement.Country
+			nwe.Rcode = tnode.val.Rcode
+			wfe[qname][uint16(qtype)] = nwe
+		}
+		table.lock.RUnlock()
+	}
+	return wf
 }
 
 // O(k)

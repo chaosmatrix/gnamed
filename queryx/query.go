@@ -17,7 +17,9 @@ import (
 
 func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
+	dc.SetIncomingMsg()
+
 	logEvent := dc.Log
 	var err error
 
@@ -33,7 +35,9 @@ func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 		rmsg := new(dns.Msg)
 		rmsg.SetReply(r)
 		rmsg.Rcode = dns.RcodeFormatError
-		return rmsg, fmt.Errorf("invalid dns query")
+		err = errors.New("invalid dns query, question section is empty")
+		logEvent.Err(err)
+		return rmsg, err
 	}
 
 	qname := r.Question[0].Name
@@ -46,8 +50,11 @@ func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 		rmsg := new(dns.Msg)
 		rmsg.SetReply(r)
 		rmsg.Rcode = dns.RcodeFormatError
-		return rmsg, fmt.Errorf("invalid dns query")
+		err = fmt.Errorf("invalid dns query, type or class is invalid, name: '%s', type: %d, class: %d", qname, r.Question[0].Qtype, r.Question[0].Qclass)
+		logEvent.Err(err)
+		return rmsg, err
 	}
+	//r.Compress = true // always compress
 
 	// disable singleflight
 	if !config.Server.Main.Singleflight {
@@ -70,7 +77,7 @@ func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 	// singleflight already make sure do deep copy, return values are concurrency safe.
 	if hit {
 		// return from prev copy, need to make sure update name
-		setReply(rmsg, r, qname)
+		setReply(rmsg, dc.GetIncomingMsg())
 		return rmsg, err
 	}
 	return rmsg, err
@@ -78,12 +85,12 @@ func Query(dc *libnamed.DConnection, config *configx.Config) (*dns.Msg, error) {
 
 func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dns.Msg, error) {
 
-	r := dc.IncomingMsg
+	r := dc.OutgoingMsg
 	logEvent := dc.Log
 
 	var err error
 
-	qname := r.Question[0].Name
+	qname := strings.ToLower(r.Question[0].Name)
 	outgoingQname := qname
 	qtype := dns.TypeToString[r.Question[0].Qtype]
 
@@ -94,7 +101,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		rmsg.SetReply(r)
 		rmsg.Rcode = dns.RcodeFormatError
 		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[r.Rcode])
-		return r, fmt.Errorf("invalid domain base on RFC 1035 and RFC 3696")
+		return rmsg, fmt.Errorf("invalid domain base on RFC 1035 and RFC 3696")
 	}
 
 	// 2. whitelist/blacklist search
@@ -126,7 +133,14 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		rmsg := new(dns.Msg)
 		rmsg.SetReply(r)
 		rmsg.Rcode = dns.RcodeServerFailure
-		return r, fmt.Errorf("server failure, no view match qname")
+		return rmsg, fmt.Errorf("server failure, no view match qname")
+	}
+
+	// hijack
+	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && view.RrHTTPS.Hijack {
+		rmsg, err := queryInterceptHTTPS(r, nil, &view)
+		logEvent.Str("query_type", "query_fake").Str("rcode", dns.RcodeToString[rmsg.Rcode]).Bool("hijack", true)
+		return rmsg, err
 	}
 
 	// 3. cache search
@@ -144,16 +158,17 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 					// do background query
 					go func(nr *dns.Msg, lockKey string) {
 						defer cacheCfg.BackgroundQueryUnlock(lockKey)
-						_logEvent := libnamed.Logger.Trace().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype]).Str("qclass", dns.ClassToString[nr.Question[0].Qclass])
+						_logEvent := libnamed.Logger.Info().Str("log_type", "query_background").Uint16("id", nr.Id).Str("qtype", dns.TypeToString[nr.Question[0].Qtype]).Str("qclass", dns.ClassToString[nr.Question[0].Qclass])
 						// bypass singleflight & cache
 						// if not bypass singleflight, depend on schedule, background query might reply from cache itself:
 						// background query execute before reply from cache
 						// if curr query include all same querys blocking by singleflight have completed and background query hasn't completed,
 						// might be more than one outgoing same query
 						ndc := &libnamed.DConnection{
-							IncomingMsg: nr,
+							OutgoingMsg: nr,
 							Log:         _logEvent,
 						}
+						ndc.SetIncomingMsg()
 						_, nerr := query(ndc, cfg, true)
 						_logEvent.Err(nerr).Msg("")
 					}(r.Copy(), lockKey)
@@ -166,7 +181,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 			} else {
 				logEvent.Str("cache", "steal")
 			}
-			setReply(rmsg, r, qname)
+			setReply(rmsg, dc.GetIncomingMsg())
 			return rmsg, nil
 		}
 	} else {
@@ -177,13 +192,14 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	if record, found := cfg.Server.FindRecordFromHosts(outgoingQname, qtype); found {
 		logEvent.Str("query_type", "hosts")
 		rmsg := new(dns.Msg)
+		rmsg.SetReply(r)
 		rrs := strings.Join([]string{qname, "60", dns.ClassToString[r.Question[0].Qclass], qtype, record}, "    ")
 		_rr, _err := dns.NewRR(rrs)
 		if _err != nil {
 			return nil, _err
 		}
 		rmsg.Answer = []dns.RR{_rr}
-		setReply(rmsg, r, qname)
+		setReply(rmsg, dc.GetIncomingMsg())
 		return rmsg, nil
 	}
 
@@ -195,15 +211,16 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	if nameservers == nil {
 		// shouldn't reach here
 		rmsg := new(dns.Msg)
-		setReply(rmsg, r, qname)
+		rmsg.SetReply(r)
+		setReply(rmsg, dc.GetIncomingMsg())
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, fmt.Errorf("no avaliable view match name \"%s\"", qname)
 	}
 
 	logEvent.Str("query_type", "external")
 
-	oId := dc.IncomingMsg.Id
-	dc.IncomingMsg.Id |= dns.Id()
+	oId := dc.OutgoingMsg.Id
+	dc.OutgoingMsg.Id |= dns.Id()
 
 	// send dnssec query to server that don't support dnssec, might be response with FORMERR
 	//view, found := cfg.Server.View[vname]
@@ -214,15 +231,14 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 			SourceIP:      view.EcsAddress,
 			Family:        view.EcsFamily,
 			SourceNetmask: view.EcsNetMask,
-			SourceScope:   view.EcsNetMask,
-			UDPSize:       1024,
+			UDPSize:       1280,
 		}
 		libnamed.SetOpt(r, opt)
 	}
 
 	// randomw Upper/Lower domain's chars
 	if view.RandomDomain {
-		dc.IncomingMsg.Question[0].Name = libnamed.RandomUpperDomain(dc.IncomingMsg.Question[0].Name)
+		dc.OutgoingMsg.Question[0].Name = libnamed.RandomUpperDomain(dc.OutgoingMsg.Question[0].Name)
 	}
 
 	var rmsg *dns.Msg
@@ -236,7 +252,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 			rmsg, err = queryNs(dc, nameserver)
 
 			if listName, malwareIP, found := filterCheckIP(rmsg, cfg.Filter.MatchIP); found {
-				rmsg, _ = queryFake(dc.IncomingMsg, nil)
+				rmsg, _ = queryFake(dc.OutgoingMsg, nil)
 				if err != nil {
 					err = fmt.Errorf("rrs contain malware IP")
 				}
@@ -250,17 +266,17 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 		// 1. configurable query policy: serial or parallel
 		// 2. configurable result choice policy: first (response) or merge
 		completed := make(chan *queryResult, len(nameservers))
-		for tag, _ := range nameservers {
+		for tag := range nameservers {
 			go func(tag string) {
 				// only copy IncommingMsg, share logEvent
 				ndc := &libnamed.DConnection{
-					IncomingMsg: dc.IncomingMsg.Copy(),
+					OutgoingMsg: dc.OutgoingMsg.Copy(),
 					Log:         nil, // set nil, panic is buggy
 					SubLog:      zerolog.Dict().Str("nameserver_tag", tag),
 				}
 				tmsg, terr := queryNs(ndc, nameservers[tag])
 				if listName, malwareIP, found := filterCheckIP(tmsg, cfg.Filter.MatchIP); found {
-					tmsg, _ = queryFake(ndc.IncomingMsg, nil)
+					tmsg, _ = queryFake(ndc.OutgoingMsg, nil)
 					if terr != nil {
 						terr = fmt.Errorf("rrs contain malware IP")
 					}
@@ -288,13 +304,13 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	logEvent.Array("queries", logQueries)
 	logEvent.Dur("latency_query", time.Since(queryStartTime))
 
-	dc.IncomingMsg.Id = oId
+	dc.OutgoingMsg.Id = oId
 	if rmsg != nil {
 		rmsg.Id = oId
 	}
 
-	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && (view.RrHTTPS.Replace || !rrExist(rmsg, r.Question[0].Qtype)) {
-		logEvent.Bool("intercept_with_fake", true)
+	if r.Question[0].Qtype == dns.TypeHTTPS && view.RrHTTPS != nil && !rrExist(rmsg, r.Question[0].Qtype) {
+		logEvent.Bool("replace", true)
 		ips := fetchIP(r, cfg)
 		rmsg, err = queryInterceptHTTPS(r, ips, &view)
 	}
@@ -310,13 +326,29 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 
 	// 4. cache response
 	if err == nil && rmsg != nil {
+
 		logEvent.Str("rcode", dns.RcodeToString[rmsg.Rcode])
+		if reOrder := rrPrivateFirst(rmsg); reOrder {
+			logEvent.Bool("re_order", reOrder)
+		}
 
 		cacheTTL := getMsgTTL(rmsg, &cfg.Server.RrCache)
 		if cacheTTL == 0 {
 			// rfc1035#section-4.1.3
 			// zero ttl can be use for DNS rebinding attack, for the sake of security, should cache it short time
 			// https://crypto.stanford.edu/dns/dns-rebinding.pdf
+			// https://github.com/Rhynorater/rebindMultiA
+			// dns-rebinding way:
+			// 1. only one record with small ttl (zero), trigger client redo dns lookup
+			// 2. multi record and control the record's sequence, make first record unacceptable, trigger client connect the second record
+			//
+			// fix:
+			// 1. server:
+			// 	> E2E support, https
+			// 2. client:
+			// 	> always use E2E protocol
+			// 	> if private and public address co-exist, always select the private address (linux/unix-like system)
+			// 	> reject the response that contain private address from un-trust public dns server
 			logEvent.Str("cache", "skip_zero_ttl")
 		} else {
 			if ok := cacheSetDnsMsg(rmsg, cacheTTL); ok {
@@ -330,7 +362,7 @@ func query(dc *libnamed.DConnection, cfg *configx.Config, byPassCache bool) (*dn
 	}
 
 	// 5. update reply msg
-	setReply(rmsg, r, qname)
+	setReply(rmsg, dc.GetIncomingMsg())
 
 	return rmsg, err
 }
@@ -372,9 +404,9 @@ func fetchIP(r *dns.Msg, cfg *configx.Config) []net.IP {
 			m := r.Copy()
 			m.Question[0].Qtype = qtype
 
-			logEvent := libnamed.Logger.Trace().Str("op_type", "op_https_sub")
+			logEvent := libnamed.Logger.Info().Str("op_type", "op_https_sub")
 			dc := &libnamed.DConnection{
-				IncomingMsg: m,
+				OutgoingMsg: m,
 				Log:         logEvent,
 			}
 			resp, err := Query(dc, cfg)
@@ -408,6 +440,10 @@ func rrFetchIP(m *dns.Msg) []net.IP {
 	res := []net.IP{}
 
 	if m != nil && m.Answer != nil {
+		if qtype := m.Question[0].Qtype; qtype != dns.TypeA && qtype != dns.TypeAAAA {
+			return res
+		}
+
 		for _, ans := range m.Answer {
 			rtype := ans.Header().Rrtype
 			if rtype == dns.TypeA {
@@ -440,6 +476,11 @@ func rrExist(m *dns.Msg, qtype uint16) bool {
 
 func filterCheckIP(m *dns.Msg, f func(string) (string, bool)) (string, string, bool) {
 	if m != nil && m.Answer != nil {
+
+		if qtype := m.Question[0].Qtype; qtype != dns.TypeA && qtype != dns.TypeAAAA {
+			return "", "", false
+		}
+
 		for _, ans := range m.Answer {
 			rtype := ans.Header().Rrtype
 			if rtype == dns.TypeA {
@@ -462,43 +503,76 @@ func filterCheckIP(m *dns.Msg, f func(string) (string, bool)) (string, string, b
 	return "", "", false
 }
 
-// FIXME: public function should not here
-func GetMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
-	return getMsgTTL(r, cacheCfg)
+// re-sort answer section
+// rules:
+// 1. private ip first
+//
+// return true if need to re-order rrset
+// dns-rebind prevent:
+// 1. https://crypto.stanford.edu/dns/dns-rebinding.pdf
+// 2. https://github.com/Rhynorater/rebindMultiA
+func rrPrivateFirst(m *dns.Msg) bool {
+
+	if qtype := m.Question[0].Qtype; qtype != dns.TypeA && qtype != dns.TypeAAAA {
+		return false
+	}
+
+	j := 0
+	for i, ans := range m.Answer {
+		if a, ok := ans.(*dns.A); ok {
+			if a.A.IsPrivate() {
+				m.Answer[i], m.Answer[j] = m.Answer[j], m.Answer[i]
+				j++
+			}
+		} else if aaaa, ok := ans.(*dns.AAAA); ok {
+			if aaaa.AAAA.IsPrivate() {
+				m.Answer[i], m.Answer[j] = m.Answer[j], m.Answer[i]
+				j++
+			}
+		}
+	}
+
+	return j != 0
 }
 
-func getMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
+// FIXME: public function should not here
+func GetMsgTTL(msg *dns.Msg, cacheCfg *configx.RrCache) uint32 {
+	return getMsgTTL(msg, cacheCfg)
+}
+
+// Warning: this is a violation of the RFC
+func getMsgTTL(msg *dns.Msg, cacheCfg *configx.RrCache) uint32 {
 
 	var ttl uint32 = 0
 
-	if r == nil {
+	if msg == nil {
 		return ttl
 	}
 
 	// fix upstream server temporary failure
-	if r.Rcode == dns.RcodeServerFailure {
-		return cacheCfg.NxMinTtl
+	if msg.Rcode != dns.RcodeSuccess && msg.Rcode != dns.RcodeNameError {
+		return cacheCfg.ErrTtl
 	}
 
-	if len(r.Answer) > 0 {
-		qtype := r.Question[0].Qtype
-		for _, rr := range r.Answer {
-			if rr.Header().Rrtype != qtype {
-				continue
+	if len(msg.Answer) > 0 {
+		qtype := msg.Question[0].Qtype
+		for _, rr := range msg.Answer {
+			if rr.Header().Rrtype == qtype {
+				ttl = rr.Header().Ttl
+				break
 			}
-			ttl = rr.Header().Ttl
-			break
 		}
 		if ttl == 0 {
 			// only cname, but no qtype record
-			ttl = r.Answer[0].Header().Ttl
+			ttl = msg.Answer[0].Header().Ttl
 		}
-
-		if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
+		if ttl < cacheCfg.MinTTL {
+			ttl = cacheCfg.MinTTL
+		} else if cacheCfg.MaxTTL > 0 && ttl > cacheCfg.MaxTTL {
 			ttl = cacheCfg.MaxTTL
 		}
 	} else {
-		for _, rr := range r.Ns {
+		for _, rr := range msg.Ns {
 			if rr.Header().Rrtype == dns.TypeSOA {
 				if soa, ok := rr.(*dns.SOA); ok {
 					ttl = soa.Expire
@@ -508,35 +582,23 @@ func getMsgTTL(r *dns.Msg, cacheCfg *configx.RrCache) uint32 {
 		}
 	}
 
-	if ttl < cacheCfg.MinTTL {
-		ttl = cacheCfg.MinTTL
-	}
 	return ttl
 }
 
 func cacheSetDnsMsg(r *dns.Msg, cacheTTL uint32) bool {
-	bmsg, err := r.Pack()
-	if err != nil || cacheTTL <= 0 {
+	if cacheTTL <= 0 {
 		qname := r.Question[0].Name
 		qtype := r.Question[0].Qtype
-		libnamed.Logger.Error().Str("log_type", "cache").Str("op_type", "pack_msg").Str("name", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
+		libnamed.Logger.Error().Str("log_type", "cache").Str("name", qname).Str("qtype", dns.TypeToString[qtype]).Msg("cache ttl less or equal 0")
 		return false
 	}
-	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, bmsg, cacheTTL)
+	return cachex.Set(strings.ToLower(r.Question[0].Name), r.Question[0].Qtype, r, cacheTTL)
 }
 
 func cacheGetDnsMsg(r *dns.Msg, cacheCfg *configx.RrCache) (*dns.Msg, int64, uint32, bool) {
 	qname := r.Question[0].Name
 	qtype := r.Question[0].Qtype
-	if bmsg, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {
-		resp := new(dns.Msg)
-		if err := resp.Unpack(bmsg); err != nil {
-			// 1. log error
-			// 2. delete cache ?
-			// 3. ignore
-			libnamed.Logger.Error().Str("log_type", "cache").Str("op_type", "unpack_cache_msg").Str("name", qname).Str("qtype", dns.TypeToString[qtype]).Err(err).Msg("")
-			return nil, 0, 0, false
-		}
+	if resp, expiredUTC, found := cachex.Get(strings.ToLower(qname), qtype); found || (cacheCfg.UseSteal && expiredUTC > 0) {
 
 		cacheTTL := getMsgTTL(resp, cacheCfg)
 		replyUpdateTTL(resp, expiredUTC, cacheTTL)
@@ -587,39 +649,11 @@ func subTTL(ttl uint32, skip uint32) uint32 {
 	}
 }
 
-func replyUpdateName(r *dns.Msg, oldname string) {
+func setReply(resp *dns.Msg, r *dns.Msg) {
 
-	if len(r.Question) == 0 || oldname == "" {
-		return
-	}
-	qname := r.Question[0].Name
-	if qname != oldname {
-		// Question SECTION
-		for i := range r.Question {
-			r.Question[i].Name = oldname
-		}
-		// ANSWER SECTION
-		for i := range r.Answer {
-			if r.Answer[i].Header().Name == qname {
-				r.Answer[i].Header().Name = oldname
-			}
-		}
-		// AUTHORITY SECTION
-		for i := range r.Ns {
-			if r.Ns[i].Header().Name == qname {
-				r.Ns[i].Header().Name = oldname
-			}
-		}
-		// ADDITIONAL SECTION
-		for i := range r.Extra {
-			if r.Extra[i].Header().Name == qname {
-				r.Extra[i].Header().Name = oldname
-			}
-		}
-	}
-}
+	oldName := resp.Question[0].Name
+	newName := r.Question[0].Name
 
-func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 	if resp != r {
 		rcode := resp.Rcode
 		// if resp refer to r, Questions will set as make([]Question, 1), no valid question
@@ -650,5 +684,62 @@ func setReply(resp *dns.Msg, r *dns.Msg, oldName string) {
 		resp.RecursionAvailable = true
 	}
 
-	replyUpdateName(resp, oldName)
+	replyUpdateName(resp, oldName, newName)
+}
+
+// Case:
+// 1. some upstream nameserver can't handle dns query which qname has uppercase letter, will reply message that qname not equal with the name in answer section
+//
+// for example:
+/*
+;; opcode: QUERY, status: NOERROR, id: 1
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;EXAMPLE.COM.     IN       A
+
+;; ANSWER SECTION:
+example.com.      60      IN      A       1.2.3.4
+example.com.      60      IN      A       1.2.3.5
+*/
+func replyUpdateName(r *dns.Msg, oldName string, newName string) {
+
+	if oldName == newName && oldName == strings.ToLower(oldName) {
+		return
+	}
+
+	// Question SECTION
+	for i := range r.Question {
+		r.Question[i].Name = newName
+	}
+	// ANSWER SECTION
+	for i := range r.Answer {
+		if wrapStringsEqualFold(r.Answer[i].Header().Name, oldName) {
+			r.Answer[i].Header().Name = newName
+		}
+	}
+	// AUTHORITY SECTION
+	for i := range r.Ns {
+		if wrapStringsEqualFold(r.Ns[i].Header().Name, oldName) {
+			r.Ns[i].Header().Name = newName
+		}
+	}
+	// ADDITIONAL SECTION
+	for i := range r.Extra {
+		if wrapStringsEqualFold(r.Extra[i].Header().Name, oldName) {
+			r.Extra[i].Header().Name = newName
+		}
+	}
+}
+
+// built-in function strings.EqualFold not compare the length of two strings at the beginning
+// performance(5x slower than s == t):
+// 1. strings.EqualFold(): 10ns/op
+// 2. s == t: 2ns/op
+// 3. wrapStringsEqualFold(): 2ns/op if len(s) != len(t), others 10ns/op
+func wrapStringsEqualFold(s string, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	return strings.EqualFold(s, t)
 }

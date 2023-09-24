@@ -26,6 +26,9 @@ func RandomUpperDomain(domain string) string {
 	return string(buf)
 }
 
+// TLD domains
+// https://data.iana.org/TLD/tlds-alpha-by-domain.txt
+
 // Copy From: https://github.com/golang/go/blob/35a588109b2a6d8b610be08d32aaf99ef1549085/src/net/dnsclient.go#L78
 // isDomainName checks if a string is a presentation-format domain name
 // (currently restricted to hostname-compatible "preferred name" LDH labels and
