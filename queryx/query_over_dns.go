@@ -2,19 +2,22 @@ package queryx
 
 import (
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/types"
 	"time"
 	"unsafe"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
-func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error) {
+func queryDoD(dc *types.DConnection, dod *configx.DODServer) (*dns.Msg, error) {
 
 	r := dc.OutgoingMsg
 	//logEvent := dc.Log
 
-	resp := new(dns.Msg)
+	r.Compress = r.Compress || r.Len() >= 510
+
+	var resp *dns.Msg
 	var err error
 	var rtt time.Duration = 0
 
@@ -29,14 +32,15 @@ func queryDoD(dc *libnamed.DConnection, dod *configx.DODServer) (*dns.Msg, error
 		}
 
 		if client.Net == "tcp" && dod.ConnectionPoolTCP != nil {
-			// no way to detect vconn already close
-			// write data to "CLOSE_WAIT" is permited, error until read timeout
 			ce, _rtt, cached, _err := dod.ConnectionPoolTCP.Get()
-			//conn := ce.Conn
 
-			subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).AnErr("connection_pool_error", _err)
-			if _err == nil {
-				subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&ce.Conn)))
+			poolLog := zerolog.Dict().Dur("latency", _rtt).Bool("hit", cached).Err(_err)
+			if ce != nil {
+				poolLog.Uint64("pointer", uint64(uintptr(unsafe.Pointer(&ce))))
+			}
+			subEvent.Dict("pool", poolLog)
+
+			if _err == nil && ce.Conn != nil {
 				resp, rtt, err = client.ExchangeWithConn(r, ce.Conn)
 				if err != nil {
 					ce.Conn.Close()

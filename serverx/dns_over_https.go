@@ -1,24 +1,29 @@
 package serverx
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"gnamed/configx"
+	"gnamed/ext/bytespool"
+	"gnamed/ext/types"
+	"gnamed/ext/xlog"
 	"gnamed/libnamed"
 	"gnamed/queryx"
 	"io"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 )
+
+type dohServerOpt struct {
+	compress bool
+}
 
 // https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
 // https://github.com/gin-contrib/cors
@@ -35,7 +40,7 @@ func enableCors(c *gin.Context) {
 	c.Header("Access-Control-Allow-Credentials", "true")
 }
 
-func handleCorsPreflight(c *gin.Context) {
+func (ds *dohServerOpt) handleCorsPreflight(c *gin.Context) {
 	if c.Request.Method == http.MethodOptions {
 		c.String(http.StatusNoContent, "")
 		return
@@ -44,11 +49,11 @@ func handleCorsPreflight(c *gin.Context) {
 	c.String(http.StatusMethodNotAllowed, "")
 }
 
-func handleDoHRequest(c *gin.Context) {
+func (ds *dohServerOpt) handleDoHRequest(c *gin.Context) {
 
-	dc := &libnamed.DConnection{
+	dc := &types.DConnection{
 		OutgoingMsg: nil,
-		Log:         libnamed.Logger.Info(),
+		Log:         xlog.Logger().Info(),
 	}
 	start := time.Now()
 	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
@@ -66,15 +71,15 @@ func handleDoHRequest(c *gin.Context) {
 	case configx.DOHAcceptHeaderTypeJSON:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeJSON))
-		handleDoHRequestJSON(c, dc)
+		ds.handleDoHRequestJSON(c, dc)
 	case configx.DOHAccetpHeaderTypeRFC8484:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeRFC8484))
-		handleDoHRequestRFC8484(c, dc)
+		ds.handleDoHRequestRFC8484(c, dc)
 	default:
 		//
 		logEvent.Str("doh_msg_type", string(configx.DOHMsgTypeJSON))
-		handleDoHRequestJSON(c, dc)
+		ds.handleDoHRequestJSON(c, dc)
 	}
 	logEvent.Dur("latency", time.Since(start)).Msg("")
 }
@@ -82,6 +87,11 @@ func handleDoHRequest(c *gin.Context) {
 func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
 	logEvent.Int("status_code", http.StatusBadRequest)
 	c.String(http.StatusBadRequest, "invalid message type\r\n")
+}
+
+func handleDoHRequestBadGateway(c *gin.Context, logEvent *zerolog.Event) {
+	logEvent.Int("status_code", http.StatusBadGateway)
+	c.String(http.StatusBadGateway, "502 Bad Gateway\r\n")
 }
 
 // No RFC
@@ -106,7 +116,7 @@ func handleDoHRequestBadRequest(c *gin.Context, logEvent *zerolog.Event) {
 // 1. google
 // 2. 1.1.1.1 https://developers.cloudflare.com/1.1.1.1/encrypted-dns/dns-over-https/make-api-requests/dns-json
 // 3. nextdns
-func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
+func (ds *dohServerOpt) handleDoHRequestJSON(c *gin.Context, dc *types.DConnection) {
 
 	logEvent := dc.Log
 	qname, found := c.GetQuery("name")
@@ -154,14 +164,14 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 		return
 	}
 
-	resp := libnamed.DOHJson{
+	resp := types.DOHJson{
 		Status: rmsg.Rcode,
 		TC:     rmsg.Truncated,
 		RD:     rmsg.RecursionDesired,
 		RA:     rmsg.RecursionAvailable,
 		AD:     rmsg.AuthenticatedData,
 		CD:     rmsg.CheckingDisabled,
-		Question: []libnamed.DOHJsonQuestion{{
+		Question: []types.DOHJsonQuestion{{
 			Name: qname,
 			Type: qtypeNum,
 		}},
@@ -169,7 +179,7 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 
 	if len(rmsg.Answer) > 0 {
 		for _, ans := range rmsg.Answer {
-			jans := libnamed.DOHJsonAnswer{
+			jans := types.DOHJsonAnswer{
 				Name: ans.Header().Name,
 				Type: ans.Header().Rrtype,
 				TTL:  int64(ans.Header().Ttl),
@@ -181,7 +191,7 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 
 	if len(rmsg.Ns) > 0 {
 		for _, ans := range rmsg.Ns {
-			jans := libnamed.DOHJsonAnswer{
+			jans := types.DOHJsonAnswer{
 				Name: ans.Header().Name,
 				Type: ans.Header().Rrtype,
 				TTL:  int64(ans.Header().Ttl),
@@ -221,12 +231,13 @@ func handleDoHRequestJSON(c *gin.Context, dc *libnamed.DConnection) {
 // response:
 // 1. header: "Content-Type: dns-message"
 // 2. body: DNS wireformat
-func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
+func (ds *dohServerOpt) handleDoHRequestRFC8484(c *gin.Context, dc *types.DConnection) {
 
 	logEvent := dc.Log
 
-	var bs []byte
+	var r *dns.Msg
 	var err error
+
 	switch c.Request.Method {
 	case http.MethodGet:
 		hexStr, found := c.GetQuery("dns")
@@ -235,15 +246,30 @@ func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
 			handleDoHRequestBadRequest(c, logEvent)
 			return
 		}
-		//bs, err = hex.DecodeString(hexStr)
-		bs, err = base64.RawURLEncoding.DecodeString(hexStr)
+		decLen := base64.RawURLEncoding.DecodedLen(len(hexStr))
+		buf := bytespool.Get(decLen)
+		var off int
+		off, err = base64.RawURLEncoding.Decode(buf, []byte(hexStr))
+		if err != nil {
+			logEvent.Err(err)
+			handleDoHRequestBadRequest(c, logEvent)
+			return
+		}
+		r = new(dns.Msg)
+		err = r.Unpack(buf[:off])
+		bytespool.Put(buf)
+		buf = nil
 	case http.MethodPost:
 		if c.GetHeader("Content-Type") != string(configx.DOHAccetpHeaderTypeRFC8484) {
 			logEvent.Int("status_code", http.StatusMethodNotAllowed)
 			c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
 			return
 		}
-		bs, err = c.GetRawData()
+		bodyLen := c.Request.ContentLength + 2
+		if bodyLen <= 0 {
+			bodyLen = 128
+		}
+		r, _, err = bytespool.UnpackMsgWitBufSize(c.Request.Body, int(bodyLen), bytespool.MaskEncodeWithoutLength)
 	default:
 		logEvent.Int("status_code", http.StatusMethodNotAllowed)
 		c.String(http.StatusMethodNotAllowed, "method not allowed\r\n")
@@ -256,93 +282,61 @@ func handleDoHRequestRFC8484(c *gin.Context, dc *libnamed.DConnection) {
 		return
 	}
 
-	r := new(dns.Msg)
-	err = r.Unpack(bs)
-	if err != nil {
-		logEvent.Err(err)
-		handleDoHRequestBadRequest(c, logEvent)
-		return
-	}
-
 	dc.OutgoingMsg = r
 	cfg := configx.GetGlobalConfig()
 	rmsg, err := queryx.Query(dc, cfg)
 	if err != nil {
 		logEvent.Err(err)
-		handleDoHRequestBadRequest(c, logEvent)
+		handleDoHRequestBadGateway(c, logEvent)
 		return
 	}
 
-	bmsg, err := rmsg.Pack()
+	rmsg.Compress = ds.compress
+	buf, off, reuse, err := bytespool.PackMsgWitBufSize(rmsg, 0, bytespool.MaskEncodeWithoutLength)
+	if reuse {
+		defer func() { bytespool.Put(buf) }()
+	}
 	if err != nil {
 		logEvent.Err(err).Int("status_code", http.StatusInternalServerError)
 		c.String(http.StatusInternalServerError, "internal server error\r\n")
 		return
 	}
+	bmsg := buf[:off]
+
 	c.Header("Content-Type", c.GetHeader("Accept"))
 	logEvent.Int("status_code", http.StatusOK)
 
 	c.String(http.StatusOK, string(bmsg))
 }
 
-func (srv *ServerMux) serveDoH(listen configx.Listen, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		//serveDoHFunc(listen)
-		gin.SetMode(gin.ReleaseMode)
+func getHTTPHandler(listen *configx.Listen) *gin.Engine {
 
-		v := os.Getenv(envGinDisableLog)
-		if v != "" {
-			gin.DefaultWriter = io.Discard
-		}
-		r := gin.New()
-		if v == "" {
-			r.Use(gin.Logger(), gin.Recovery())
-		} else {
-			r.Use(gin.Recovery())
-			//gin.DefaultErrorWriter = ioutil.Discard
-		}
-		r.Use(corsHandler())
+	gin.SetMode(gin.ReleaseMode)
 
-		if listen.DohPath == "" {
-			r.GET("/dns-query", handleDoHRequest)
-			r.POST("/dns-query", handleDoHRequest)
-			r.OPTIONS("/dns-query", handleCorsPreflight)
-		} else {
-			r.GET(listen.DohPath, handleDoHRequest)
-			r.POST(listen.DohPath, handleDoHRequest)
-			r.OPTIONS(listen.DohPath, handleCorsPreflight)
-		}
+	v := os.Getenv(envGinEnableLog)
+	if v == "" {
+		gin.DefaultWriter = io.Discard
+	}
+	r := gin.New()
+	if v != "" {
+		r.Use(gin.Logger(), gin.Recovery())
+	} else {
+		r.Use(gin.Recovery())
+	}
+	r.Use(corsHandler())
 
-		httpSrv := &http.Server{
-			Addr:         listen.Addr,
-			Handler:      r,
-			IdleTimeout:  listen.Timeout.IdleDuration,
-			ReadTimeout:  listen.Timeout.ReadDuration,
-			WriteTimeout: listen.Timeout.WriteDuration,
-		}
+	ds := dohServerOpt{
+		compress: !listen.DisableCompressMsg,
+	}
+	if listen.URLPath == "" {
+		r.GET("/dns-query", ds.handleDoHRequest)
+		r.POST("/dns-query", ds.handleDoHRequest)
+		r.OPTIONS("/dns-query", ds.handleCorsPreflight)
+	} else {
+		r.GET(listen.URLPath, ds.handleDoHRequest)
+		r.POST(listen.URLPath, ds.handleDoHRequest)
+		r.OPTIONS(listen.URLPath, ds.handleCorsPreflight)
+	}
 
-		srv.registerOnShutdown(func() {
-			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-			err := httpSrv.Shutdown(context.Background())
-			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
-
-			wg.Done()
-			logEvent.Msg("server has been shutdown")
-		})
-
-		if listen.TlsConfig.CertFile == "" {
-			//err := r.Run(listen.Addr)
-			err := httpSrv.ListenAndServe()
-			if err != nil && err != http.ErrServerClosed {
-				panic(err)
-			}
-		} else {
-			//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-			err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-			if err != nil && err != http.ErrServerClosed {
-				panic(err)
-			}
-		}
-	}()
+	return r
 }

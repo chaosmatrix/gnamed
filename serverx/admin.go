@@ -2,16 +2,14 @@ package serverx
 
 import (
 	"context"
-	"crypto/hmac"
 	"errors"
 	"fmt"
 	"gnamed/cachex"
 	"gnamed/configx"
-	"gnamed/libnamed"
-	"gnamed/queryx"
+	"gnamed/ext/xlog"
 	"io"
-	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"path"
 	"sort"
@@ -33,51 +31,41 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := configx.GetGlobalConfig()
 
-		if len(cfg.Admin.Auth.Cidr) == 0 && len(cfg.Admin.Auth.Token) == 0 {
-			return
+		user, password := c.Query("user"), c.Query("password")
+		if user == "" && password == "" {
+			if u, p, ok := c.Request.BasicAuth(); ok {
+				user, password = u, p
+			}
+			if user == "" && password == "" {
+				user, _ = c.Cookie("user")
+				password, _ = c.Cookie("password")
+			}
 		}
 
 		clientIP := c.ClientIP()
 
-		cidrAllow := len(cfg.Admin.Auth.Cidr) == 0
-		if len(cfg.Admin.Auth.Cidr) != 0 {
+		err := cfg.Admin.Auth.CheckAllow(user, password, clientIP)
+		if err == nil {
+			userc, _ := c.Cookie("user")
+			passwordc, _ := c.Cookie("password")
 
-			for _, cidr := range cfg.Admin.Auth.Cidr {
-				subNet := "/32"
-				if i := strings.Index(cidr, "/"); i > 0 {
-					subNet = cidr[i:]
-				} else {
-					cidr += "/32"
-				}
-
-				if _, clientCidr, err := net.ParseCIDR(clientIP + subNet); err == nil && clientCidr.String() == cidr {
-					cidrAllow = true
-					break
-				}
+			if userc != user || passwordc != password {
+				secure := c.Request.TLS != nil
+				host := c.Request.Host
+				c.SetCookie("user", user, 3600, "/", host, secure, true)
+				c.SetCookie("password", password, 3600, "/", host, secure, true)
 			}
-		}
-
-		// token check
-		if cidrAllow {
-			user, password := c.Query("user"), c.Query("password")
-			if len(cfg.Admin.Auth.Token) == 0 || (user != "" && password != "" && hmac.Equal([]byte(cfg.Admin.Auth.Token[user]), []byte(password))) {
-				return
-			}
+			return
 		}
 
 		//c.AbortWithStatus(http.StatusUnauthorized)
 		c.JSON(http.StatusUnauthorized, AdminResponse{
 			Status: 1,
 			Desc:   "auth require",
-			Msg:    "",
+			Msg:    err.Error(),
 		})
+		c.Keys["log_message"] = err.Error()
 		c.Abort()
-
-		if !cidrAllow {
-			c.Keys["log_message"] = "client ip not allow"
-		} else {
-			c.Keys["log_message"] = "user or password wrong"
-		}
 	}
 }
 
@@ -92,7 +80,7 @@ func LoggerMiddleware() gin.HandlerFunc {
 
 		start := time.Now()
 
-		logEvent := libnamed.Logger.Info().Str("log_type", "admin")
+		logEvent := xlog.Logger().Info().Str("log_type", "admin")
 
 		clientIP := c.ClientIP()
 		logEvent.Str("clientip", clientIP).Str("method", c.Request.Method).Str("uri", c.Request.URL.RequestURI())
@@ -233,13 +221,16 @@ func handleRequestAdminCache(c *gin.Context) {
 // GET /cache/show?name=<domain>&type=<type_str>
 func handleRequestAdminCacheShow(c *gin.Context, name string, qtype string) {
 
-	if rmsg, expiredUTC, found := cachex.Get(name, dns.StringToType[qtype]); found {
+	if rmsg, expiredUTC, found := cachex.Get(name, dns.StringToType[qtype]); found || rmsg != nil {
 
-		cacheTtl := queryx.GetMsgTTL(rmsg, &configx.GetGlobalConfig().Server.RrCache)
+		rc := configx.GetGlobalConfig().Server.RrCache
+		fmt.Printf("%#v\n", rc)
+		ttl := rc.GetMsgTTL(rmsg)
+
 		expiredTime := time.Unix(expiredUTC, 0).String()
-		addTime := time.Unix(expiredUTC-int64(cacheTtl), 0)
+		addTime := time.Unix(expiredUTC-int64(ttl), 0)
 
-		headStr := fmt.Sprintf("\n;;\n;;\n;; add at:     %s\n;; expired at: %s\n;;\n", addTime, expiredTime)
+		headStr := fmt.Sprintf("\n;;\n;;\n;; valid:      %v\n;; cache ttl:  %d\n;; add at:     %s\n;; expired at: %s\n;;\n", found, ttl, addTime, expiredTime)
 		c.String(http.StatusOK, headStr+rmsg.String())
 	} else {
 		c.JSON(http.StatusNotFound, AdminResponse{
@@ -308,9 +299,8 @@ func handleRequestAdminCacheDump(c *gin.Context) {
 
 // GET /cache/store
 func handleRequestAdminCacheStore(c *gin.Context) {
-	wf := cachex.Store()
 	wri := configx.GetGlobalConfig().WarmRunnerInfo
-	err := wri.Store(wf)
+	err := wri.Store()
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v\n", err))
 	} else {
@@ -318,74 +308,104 @@ func handleRequestAdminCacheStore(c *gin.Context) {
 	}
 }
 
-func (srv *ServerMux) serveAdmin(listen configx.Listen, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		//serveAdminFunc(listen)
-		// r = gin.Default()
-		// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
-		gin.SetMode(gin.ReleaseMode)
+var httpProfileS = map[string]func(c *gin.Context){
+	"/":        gin.WrapF(pprof.Index),
+	"/cmdline": gin.WrapF(pprof.Cmdline),
+	"/profile": gin.WrapF(pprof.Profile),
+	"/symbol":  gin.WrapF(pprof.Symbol),
+	"/trace":   gin.WrapF(pprof.Trace),
+}
 
-		v := os.Getenv(envGinDisableLog)
-		if v != "" {
-			gin.DefaultWriter = io.Discard
-			//gin.DefaultErrorWriter = ioutil.Discard
-		}
-		r := gin.New()
-		if v == "" {
-			r.Use(gin.Logger(), gin.Recovery())
-		} else {
-			r.Use(gin.Recovery())
-		}
+const pprofPrefix = "/debug/pprof"
 
-		r.Use(LoggerMiddleware())
-		r.Use(AuthMiddleware())
+func handleProfile(c *gin.Context) {
+	path := c.Request.URL.Path
+	if len(path) > len(pprofPrefix) {
+		path = path[len(pprofPrefix):]
+	}
 
-		cachePath := path.Join(listen.DohPath, "/cache/:action")
-		r.GET(cachePath, handleRequestAdminCache)
-		r.POST(cachePath, handleRequestAdminCache)
+	if f, found := httpProfileS[path]; found {
+		f(c)
+		return
+	}
 
-		configPath := path.Join(listen.DohPath, "/config/:action")
-		r.GET(configPath, srv.handleRequestAdminConfig)
-		r.POST(configPath, srv.handleRequestAdminConfig)
+	gin.WrapF(pprof.Index)(c)
 
-		statsFilterPath := path.Join(listen.DohPath, "/stats/filter")
-		r.GET(statsFilterPath, handleRequestAdminStats)
-		r.POST(statsFilterPath, handleRequestAdminStats)
+}
 
-		filterShowPath := path.Join(listen.DohPath, "/filter/show")
-		r.GET(filterShowPath, handleRequestAdminFilterShow)
-		r.POST(filterShowPath, handleRequestAdminFilterShow)
+func (srv *ServerMux) serveAdmin(admin *configx.Admin, wg *sync.WaitGroup) {
+	for i := range admin.Listen {
+		wg.Add(1)
+		go func(listen configx.Listen) {
+			xlog.Logger().Info().Str("log_type", "admin").Str("address", listen.Addr).Str("network", listen.Network).Str("protocol", listen.Protocol).Bool("enable_profile", admin.EnableProfile).Msg("")
 
-		httpSrv := &http.Server{
-			Addr:         listen.Addr,
-			Handler:      r,
-			IdleTimeout:  listen.Timeout.IdleDuration,
-			ReadTimeout:  listen.Timeout.ReadDuration,
-			WriteTimeout: listen.Timeout.WriteDuration,
-		}
+			// r = gin.Default()
+			// fix "Creating an Engine instance with the Logger and Recovery middleware already attached."
+			gin.SetMode(gin.ReleaseMode)
 
-		srv.registerOnShutdown(func() {
-			libnamed.Logger.Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
-			err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
-			logEvent := libnamed.Logger.Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
-
-			wg.Done()
-			logEvent.Msg("server has been shutdown")
-		})
-
-		if listen.TlsConfig.CertFile == "" {
-			//err := r.Run(listen.Addr)
-			err := httpSrv.ListenAndServe()
-			if err != nil && err != http.ErrServerClosed {
-				panic(err)
+			v := os.Getenv(envGinEnableLog)
+			if v == "" {
+				gin.DefaultWriter = io.Discard
 			}
-		} else {
-			//err := r.RunTLS(listen.Addr, listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-			err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-			if err != nil && err != http.ErrServerClosed {
-				panic(err)
+			r := gin.New()
+			if v != "" {
+				r.Use(gin.Logger(), gin.Recovery())
+			} else {
+				r.Use(gin.Recovery())
 			}
-		}
-	}()
+
+			r.Use(LoggerMiddleware())
+			r.Use(AuthMiddleware())
+
+			cachePath := path.Join(listen.URLPath, "/cache/:action")
+			r.GET(cachePath, handleRequestAdminCache)
+			r.POST(cachePath, handleRequestAdminCache)
+
+			configPath := path.Join(listen.URLPath, "/config/:action")
+			r.GET(configPath, srv.handleRequestAdminConfig)
+			r.POST(configPath, srv.handleRequestAdminConfig)
+
+			statsFilterPath := path.Join(listen.URLPath, "/stats/filter")
+			r.GET(statsFilterPath, handleRequestAdminStats)
+			r.POST(statsFilterPath, handleRequestAdminStats)
+
+			filterShowPath := path.Join(listen.URLPath, "/filter/show")
+			r.GET(filterShowPath, handleRequestAdminFilterShow)
+			r.POST(filterShowPath, handleRequestAdminFilterShow)
+
+			if admin.EnableProfile {
+				pprofGroup := r.Group(pprofPrefix)
+				pprofGroup.GET("/*any", handleProfile)
+			}
+
+			httpSrv := &http.Server{
+				Addr:         listen.Addr,
+				Handler:      r,
+				IdleTimeout:  listen.Timeout.IdleDuration,
+				ReadTimeout:  listen.Timeout.ReadDuration,
+				WriteTimeout: listen.Timeout.WriteDuration,
+			}
+
+			srv.registerOnShutdown(func() {
+				xlog.Logger().Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+				err := httpSrv.Shutdown(context.Background()) // block all in-processing and idle connection closed
+				logEvent := xlog.Logger().Info().Str("log_type", "admin").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+
+				wg.Done()
+				logEvent.Msg("server has been shutdown")
+			})
+
+			if listen.TlsConfig.CertFile == "" {
+				err := httpSrv.ListenAndServe()
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			} else {
+				err := httpSrv.ListenAndServeTLS(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
+				if err != nil && err != http.ErrServerClosed {
+					panic(err)
+				}
+			}
+		}(admin.Listen[i])
+	}
 }

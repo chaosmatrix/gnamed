@@ -5,11 +5,12 @@ package serverx
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/bytespool"
+	"gnamed/ext/types"
+	"gnamed/ext/xlog"
 	"gnamed/queryx"
 	"net"
 	"sync"
@@ -19,103 +20,82 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const (
-	// https://www.rfc-editor.org/rfc/rfc9250.html#section-4.2
-	// doq max dns message size 65535 + 2 was the most safe size but increase memory usage
-	// in most implementation and use case, 4096 + 2 should be enough
-	// but in most real network, 1500 is the max MTU, dns query should not large than it
-	// first 2-octet length field indicate the dns msg size in wire format
-	// in draft version, unable to know reading dns message size
-	// in rfc9250, able to use 2-octet field to get dns msg size
-	maxDnsQueryMsgSize = dns.MaxMsgSize + 2
-)
-
 type quicServerOption struct {
 	streamWriteTimeout time.Duration
 	streamReadTimeout  time.Duration
-	bytesPool          *sync.Pool
 	maxAcceptedStream  int           // limit one connection accepted stream
 	connIdleTimeout    time.Duration // connection idle timeout, if no new stream accept, close conn actively
+	compressMsg        bool          // compress response dns message
 }
 
-func (qs *quicServerOption) handleConnection(conn quic.Connection) {
+func (qs *quicServerOption) handleConnection(cid int64, conn quic.Connection) {
 	defer conn.CloseWithError(0, "")
 	var streamWaitGroup sync.WaitGroup
 
+	network := conn.RemoteAddr().Network()
+	clientip := conn.RemoteAddr().String()
+	localip := conn.LocalAddr().String()
+
 	for c := 0; c < qs.maxAcceptedStream; c++ {
+
 		ctx, cancel := context.WithTimeout(conn.Context(), qs.connIdleTimeout)
 		stream, err := conn.AcceptStream(ctx)
-		dc := &libnamed.DConnection{
-			OutgoingMsg: nil,
-			Log:         libnamed.Logger.Info(),
-		}
-		logEvent := dc.Log
-		logEvent.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", conn.RemoteAddr().Network()).Str("clientip", conn.RemoteAddr().String())
 		if err != nil {
 			// client close connection or idle timeout
-			logEvent.Err(err).Msg("no more stream avaliable, connection idleTimeout or peer close it")
+			xlog.Logger().Debug().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", network).Int64("connection_id", cid).Str("localip", localip).Str("clientip", clientip).Err(err).Msg("close connection")
 			cancel()
-			break
+			return
 		} else {
 			cancel()
 		}
-		streamWaitGroup.Add(1)
 
-		go func(stream quic.Stream, dc *libnamed.DConnection) {
-			//logEvent.Str("stream_id", fmt.Sprintf("%d", stream.StreamID()))
-			dc.Log.Int64("stream_id", int64(stream.StreamID()))
+		streamWaitGroup.Add(1)
+		go func(stream quic.Stream) {
+			dc := &types.DConnection{
+				OutgoingMsg: nil,
+				Log:         xlog.Logger().Info(),
+			}
+			dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Str("network", network).Int64("connection_id", cid).Str("localip", localip).Str("clientip", clientip).Int64("stream_id", int64(stream.StreamID()))
 			start := time.Now()
 
 			qs.handleStream(stream, dc)
 
-			dc.Log.Dur("latency", time.Since(start)).Err(stream.Close()).Msg("")
+			dc.Log.Dur("latency", time.Since(start)).Msg("")
 			streamWaitGroup.Done()
-		}(stream, dc)
+		}(stream)
 	}
 	streamWaitGroup.Wait()
 }
 
-func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConnection) error {
-	buf := qs.bytesPool.Get().([]byte)
-	defer qs.bytesPool.Put(&buf)
-
+func (qs *quicServerOption) handleStream(stream quic.Stream, dc *types.DConnection) error {
 	logEvent := dc.Log
-	if err := stream.SetWriteDeadline(time.Now().Add(qs.streamReadTimeout)); err != nil {
+	defer func() {
+		logEvent.Err(stream.Close())
+	}()
+
+	if err := stream.SetReadDeadline(time.Now().Add(qs.streamReadTimeout)); err != nil {
 		logEvent.Err(err)
 		return err
 	}
-	n, err := stream.Read(buf)
+
+	r, lfmask, err := bytespool.UnpackMsgWitBufSize(stream, 128, bytespool.MaskEncodeWithOptionalLength)
 	if err != nil {
 		logEvent.Err(err)
 		return err
 	}
 
-	draft := false
-	pktLen := binary.BigEndian.Uint16(buf[:2])
-	if pktLen == uint16(n-2) {
-		logEvent.Str("receive_doq_version", "rfc9250")
-	} else {
-		draft = true
+	// TODO:
+	// 1. alpn in draft version must containt "-"
+	// 2. alpn in RFC9250 must bet "doq"
+	switch lfmask {
+	case bytespool.MaskEncodeWithoutLength:
 		logEvent.Str("receive_doq_version", "draft")
-	}
-
-	r := new(dns.Msg)
-	if draft {
-		if err = r.Unpack(buf[:n]); err != nil {
-			logEvent.Err(err)
-			stream.Write(replyServerFailure(r))
-			return err
-		}
-	} else {
-		if len(buf) < 2 {
-			logEvent.Err(fmt.Errorf("message size %d < 2", len(buf)))
-			return err
-		}
-		if err = r.Unpack(buf[2:n]); err != nil {
-			logEvent.Err(err)
-			stream.Write(replyServerFailure(r))
-			return err
-		}
+	case bytespool.MaskEncodeWithLength:
+		logEvent.Str("receive_doq_version", "RFC9250")
+	default:
+		err := fmt.Errorf("invalid LengthFieldMask: %d", lfmask)
+		logEvent.Str("receive_doq_version", "unknow").Err(err)
+		return err
 	}
 
 	dc.OutgoingMsg = r
@@ -126,18 +106,18 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConne
 		logEvent.Err(err)
 		return err
 	}
-	bmsg, err := resp.Pack()
+
+	resp.Compress = qs.compressMsg
+
+	buf, off, reuse, err := bytespool.PackMsgWitBufSize(resp, 0, lfmask)
 	if err != nil {
 		logEvent.Err(err)
 		return err
 	}
-
-	if !draft {
-		buf := make([]byte, 2)
-		binary.BigEndian.PutUint16(buf, uint16(len(bmsg)))
-		buf = append(buf, bmsg...)
-		bmsg = buf
+	if reuse {
+		defer func() { bytespool.Put(buf) }()
 	}
+	bmsg := buf[:off]
 
 	if err := stream.SetWriteDeadline(time.Now().Add(qs.streamWriteTimeout)); err != nil {
 		logEvent.Err(err)
@@ -147,104 +127,101 @@ func (qs *quicServerOption) handleStream(stream quic.Stream, dc *libnamed.DConne
 	return nil
 }
 
-func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoQ(listen *configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
-	go func(addr string, network string) {
-		if host, _, err := net.SplitHostPort(addr); err == nil {
+	go func() {
+		if host, _, err := net.SplitHostPort(listen.Addr); err == nil {
 			_ip := net.ParseIP(host)
 			if _ip != nil && _ip.IsUnspecified() {
 				err := errors.New("listen on unspecified address, packet receive and send address might be different")
-				libnamed.Logger.Warn().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err).Msg("")
+				xlog.Logger().Warn().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err).Msg("")
 			}
 		}
 
-		cert, err := tls.LoadX509KeyPair(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-		if err != nil {
-			panic(err)
+		if tlsc := listen.TLSConfig; tlsc != nil {
+			if len(tlsc.NextProtos) == 0 {
+				tlsc.NextProtos = []string{"doq-i02", "doq-i00", "dq", "doq"}
+			}
+			if tlsc.MinVersion < tls.VersionTLS13 {
+				tlsc.MinVersion = tls.VersionTLS13
+				if tlsc.MaxVersion < tlsc.MinVersion {
+					tlsc.MaxVersion = tlsc.MinVersion
+				}
+			}
 		}
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"doq-i02", "doq-i00", "dq", "doq"},
+
+		concurrencyStreams := int64(listen.QueriesPerConn) / 2
+		if concurrencyStreams <= 0 {
+			concurrencyStreams = int64(listen.QueriesPerConn)
+		}
+		keepAlivePeriod := listen.Timeout.IdleDuration / 2
+		if keepAlivePeriod > 15*time.Second {
+			keepAlivePeriod = 15 * time.Second
 		}
 
 		qConfig := &quic.Config{
-			HandshakeIdleTimeout:       listen.Timeout.ConnectDuration,
-			MaxIdleTimeout:             listen.Timeout.IdleDuration,
-			MaxIncomingStreams:         int64(listen.QueriesPerConn), // limit accepted streams, when reached, Accept call will block until idleTimeout
-			MaxIncomingUniStreams:      -1,                           // disallow
-			MaxStreamReceiveWindow:     maxDnsQueryMsgSize,
-			MaxConnectionReceiveWindow: uint64(maxDnsQueryMsgSize * listen.QueriesPerConn),
+			HandshakeIdleTimeout:             listen.Timeout.ConnectDuration,
+			MaxIdleTimeout:                   listen.Timeout.IdleDuration,
+			MaxIncomingStreams:               concurrencyStreams, // limit accepted streams, when reached, Accept call will block until idleTimeout
+			MaxIncomingUniStreams:            -1,                 // disallow
+			MaxStreamReceiveWindow:           dns.MaxMsgSize,
+			MaxConnectionReceiveWindow:       uint64(dns.MaxMsgSize * listen.QueriesPerConn),
+			MaxTokenAge:                      listen.Timeout.IdleDuration * 5,
+			KeepAlivePeriod:                  keepAlivePeriod,
+			DisablePathMTUDiscovery:          true,
+			DisableVersionNegotiationPackets: true,
+			Allow0RTT:                        true,
+			EnableDatagrams:                  true,
 		}
 
-		qlisten, err := quic.ListenAddr(addr, tlsConfig, qConfig)
+		qlisten, err := quic.ListenAddr(listen.Addr, listen.TLSConfig, qConfig)
 		if err != nil {
 			panic(err)
-		}
-
-		// notes: 99.7% of their traffic is also smaller than 1,232 bytes.
-		// ref: https://blog.apnic.net/2021/06/16/are-large-dns-messages-falling-to-bits/
-		// https://tools.ietf.org/id/draft-madi-dnsop-udp4dns-00.html
-		// 1232 recommended for dual-stack
-		// 1500 should be enough
-		bytesPool := &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, maxDnsQueryMsgSize)
-			},
 		}
 
 		qs := &quicServerOption{
 			streamWriteTimeout: listen.Timeout.WriteDuration,
 			streamReadTimeout:  listen.Timeout.ReadDuration,
-			bytesPool:          bytesPool,
 			maxAcceptedStream:  listen.QueriesPerConn,
 			connIdleTimeout:    listen.Timeout.IdleDuration,
+			compressMsg:        !listen.DisableCompressMsg,
 		}
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := qlisten.Close()
-			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")
 		})
 
 		var connWaitGroup sync.WaitGroup
+
+		var connectionID int64 = 0
 		for {
-			qconn, err := qlisten.Accept(context.Background())
+			//ctx, cancel := context.WithTimeout(context.Background(), qs.connIdleTimeout)
+			ctx, cancel := context.WithCancel(context.Background())
+			qconn, err := qlisten.Accept(ctx)
 			if err != nil {
-				libnamed.Logger.Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
+				xlog.Logger().Error().Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoQ).Err(err).Msg("")
 				if err == quic.ErrServerClosed {
 					// active close listener
+					cancel()
 					break
 				}
 				// TODO, should always continue ?
 				continue
 			}
+			connectionID++
 
 			connWaitGroup.Add(1)
-			go func() {
-				qs.handleConnection(qconn)
+			go func(cid int64, conn quic.Connection) {
+				qs.handleConnection(cid, conn)
 				connWaitGroup.Done()
-			}()
+			}(connectionID, qconn)
 		}
 		connWaitGroup.Wait()
 
-	}(listen.Addr, listen.Network)
-}
-
-func replyServerFailure(r *dns.Msg) []byte {
-	if r == nil || len(r.Question) == 0 {
-		return []byte{}
-	}
-	resp := new(dns.Msg)
-	resp.SetReply(r)
-	resp.Opcode = dns.RcodeServerFailure
-
-	bmsg, err := resp.Pack()
-	if err != nil {
-		return []byte{}
-	}
-
-	return bmsg
+	}()
 }

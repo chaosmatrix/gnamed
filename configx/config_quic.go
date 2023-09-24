@@ -6,12 +6,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"gnamed/libnamed"
-	"math/rand"
+	"gnamed/ext/faketimer"
+	"gnamed/ext/hyper"
+	"gnamed/ext/xlog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -21,9 +23,8 @@ import (
 
 // DNS-over-QUIC
 type DOQServer struct {
-	Server string          `json:"server"`
-	Draft  bool            `json:"draft"` // send message content to server in draft format, rather than rfc9250
-	Pool   *ConnectionPool `json:"pool"`
+	Server string `json:"server"`
+	Draft  bool   `json:"draft"` // send message content to server in draft format, rather than rfc9250
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -32,8 +33,27 @@ type DOQServer struct {
 	Timeout   Timeout   `json:"timeout"`
 
 	// use internal
-	TlsConf  *tls.Config  `json:"-"`
-	QuicConf *quic.Config `json:"-"`
+	tlsConf        *tls.Config                     `json:"-"`
+	quicConf       *quic.Config                    `json:"-"`
+	lock           *sync.Mutex                     `json:"-"`
+	connectionInfo *quicConnectionInfo             `json:"-"`
+	GetConnection  func() (quic.Connection, error) `json:"-"`
+}
+
+type quicConnectionInfo struct {
+	conn            quic.Connection
+	lastUsedUnixSec int64
+	idleTimeoutSec  int64
+}
+
+func (doq *DOQServer) init(nsi *NameServer) {
+	*doq = DOQServer{
+		Server:              nsi.addrs[0],
+		Draft:               false,
+		ExternalNameServers: nsi.ExternalNameServers,
+		TlsConfig:           *nsi.Extra.TLSConfig,
+		Timeout:             nsi.Timeout,
+	}
 }
 
 // FIXME: dot.Server was a config file, should not be change.
@@ -52,13 +72,52 @@ func (doq *DOQServer) parse() error {
 	doq.Timeout.parse()
 
 	// internal
-	doq.TlsConf = &tls.Config{
+	doq.tlsConf = &tls.Config{
 		ServerName:         sni,
-		NextProtos:         []string{"doq-i02", "doq-i00", "dq", "doq"},
+		NextProtos:         []string{"doq", "doq-i02", "doq-i00", "dq"},
 		InsecureSkipVerify: doq.TlsConfig.InsecureSkipVerify,
 	}
-	doq.QuicConf = &quic.Config{
+	if !doq.Draft {
+		doq.tlsConf.NextProtos = []string{"doq"}
+	}
+	doq.quicConf = &quic.Config{
 		HandshakeIdleTimeout: doq.Timeout.IdleDuration,
+	}
+
+	doq.lock = new(sync.Mutex)
+
+	doq.connectionInfo = &quicConnectionInfo{
+		idleTimeoutSec: int64(doq.Timeout.IdleDuration.Seconds()),
+	}
+
+	doq.GetConnection = func() (quic.Connection, error) {
+		doq.lock.Lock()
+		defer doq.lock.Unlock()
+		logEvent := xlog.Logger().Trace().Str("log_type", "quic").Str("op_type", "get_connection").Str("server", doq.Server)
+		if doq.connectionInfo.conn != nil && doq.connectionInfo.conn.Context().Err() == nil {
+			nowUnix := faketimer.GetFakeTimerUnixSecond()
+			if nowUnix-doq.connectionInfo.lastUsedUnixSec < doq.connectionInfo.idleTimeoutSec {
+				doq.connectionInfo.lastUsedUnixSec = nowUnix
+				logEvent.Bool("reuse", true).Msg("")
+				return doq.connectionInfo.conn, nil
+			} else {
+				logEvent.Bool("reuse", false).Str("reason", "idle timeout")
+			}
+		} else if doq.connectionInfo.conn != nil {
+			logEvent.Bool("reuse", false).Err(doq.connectionInfo.conn.Context().Err())
+			doq.connectionInfo.conn.CloseWithError(0, "")
+		}
+		qconn, err := quic.DialAddr(context.Background(), doq.Server, doq.tlsConf, doq.quicConf)
+		if err != nil {
+			return nil, err
+		}
+		doq.connectionInfo = &quicConnectionInfo{
+			conn:            qconn,
+			lastUsedUnixSec: faketimer.GetFakeTimerUnixSecond(),
+			idleTimeoutSec:  int64(doq.Timeout.IdleDuration.Seconds()),
+		}
+		logEvent.Msg("dial new connection")
+		return qconn, err
 	}
 
 	return nil
@@ -87,7 +146,7 @@ func (doh *DOHServer) onceDetectALPN() {
 		if err != nil {
 			panic(err)
 		}
-		ap := &libnamed.ALPHDetecter{
+		ap := &hyper.ALPHDetecter{
 			TLSConf:   tlsc,
 			WaitDelay: 1 * time.Second,
 		}
@@ -98,7 +157,7 @@ func (doh *DOHServer) onceDetectALPN() {
 			msg = "unable detect ALPN, used http/1.1"
 		}
 		doh.client = doh.newClient(alpn)
-		libnamed.Logger.Trace().Str("log_type", "query").Str("op_type", "detect_alpn").Str("url", doh.Url).Str("alpn", alpn).Dur("elapsed_time", time.Since(start)).Err(err).Msg(msg)
+		xlog.Logger().Trace().Str("log_type", "query").Str("op_type", "detect_alpn").Str("url", doh.Url).Str("alpn", alpn).Dur("elapsed_time", time.Since(start)).Err(err).Msg(msg)
 	})
 }
 
@@ -127,10 +186,6 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 		},
 	}
 
-	// rand value to against fingerprints
-	rn := rand.Int()&1 + 1
-	tn := time.Duration(rand.Int()&1) * 5 * time.Second
-
 	switch alpn {
 	case "h3":
 		// HTTP/3
@@ -138,15 +193,15 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 			DisableCompression: true,
 			//EnableDatagrams:    true,
 			QuicConfig: &quic.Config{
-				HandshakeIdleTimeout:    doh.Timeout.ConnectDuration + tn,
-				MaxIdleTimeout:          doh.Timeout.IdleDuration + tn,
-				KeepAlivePeriod:         (doh.Timeout.IdleDuration + tn) / 2,
+				HandshakeIdleTimeout:    doh.Timeout.ConnectDuration,
+				MaxIdleTimeout:          doh.Timeout.IdleDuration,
+				KeepAlivePeriod:         doh.Timeout.IdleDuration / 2,
 				DisablePathMTUDiscovery: true,
 				//EnableDatagrams:         true,
-				MaxIncomingStreams:             100 * int64(rn),
-				MaxIncomingUniStreams:          100 * int64(rn),
-				InitialStreamReceiveWindow:     512 * 1024 * uint64(rn),
-				InitialConnectionReceiveWindow: 512 * 1024 * uint64(rn),
+				MaxIncomingStreams:             100,
+				MaxIncomingUniStreams:          100,
+				InitialStreamReceiveWindow:     512 * 1024,
+				InitialConnectionReceiveWindow: 512 * 1024,
 			},
 			TLSClientConfig: tlsc,
 		}
@@ -165,7 +220,7 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 				d := &net.Dialer{
 					Timeout:       doh.Timeout.ConnectDuration, // connect timeout
-					KeepAlive:     65 * time.Second,
+					KeepAlive:     30 * time.Second,
 					FallbackDelay: -1, // disable DualStack test
 				}
 				td := tls.Dialer{
@@ -198,11 +253,11 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 		tr := &http.Transport{
 			DisableCompression: true, // dns message already compress
 			ForceAttemptHTTP2:  false,
-			Proxy:              http.ProxyFromEnvironment,
+			Proxy:              nil,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				d := &net.Dialer{
 					Timeout:       doh.Timeout.ConnectDuration, // connect timeout
-					KeepAlive:     65 * time.Second,
+					KeepAlive:     30 * time.Second,
 					FallbackDelay: -1, // disable DualStack test
 				}
 				conn, err := d.DialContext(ctx, network, addr)
@@ -215,8 +270,8 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 				return conn, err
 			},
 			MaxIdleConns:          10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   5 * time.Second,
+			IdleConnTimeout:       doh.Timeout.IdleDuration,
+			TLSHandshakeTimeout:   doh.Timeout.ConnectDuration,
 			ExpectContinueTimeout: 1 * time.Second,
 			TLSClientConfig:       tlsc,
 			//MaxResponseHeaderBytes: 10 << 20, // 10KB

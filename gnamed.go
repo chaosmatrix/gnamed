@@ -4,9 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"gnamed/cachex"
-	"gnamed/libnamed"
-	"gnamed/runner"
+	"gnamed/ext/runner"
+	"gnamed/ext/xlog"
 	"gnamed/serverx"
 	"os"
 	"os/signal"
@@ -34,10 +33,7 @@ func parseArgs() {
 func main() {
 	parseArgs()
 
-	// init logger, will be override after configuration file parsed
-	libnamed.InitGlobalLogger()
-
-	libnamed.Logger.Debug().Str("log_type", "main").Str("op_type", "start").Msg("")
+	xlog.Logger().Debug().Str("log_type", "main").Str("op_type", "start").Msg("")
 
 	cfg, err := configx.ParseConfig(configFile)
 	if err != nil {
@@ -57,32 +53,9 @@ func main() {
 		return
 	}
 
-	fakeTimer := libnamed.NewFakeTimer(1 * time.Second)
-	fakeTimer.Run()
-
-	err = libnamed.InitDefaultLogger(cfg.Server.Main.LogFile, cfg.Server.Main.LogLevel)
-	if err != nil {
-		fmt.Printf("[+] failed to init default logger\n")
-		panic(err)
-	}
-
-	// init geoip2
-	err = libnamed.InitGeoReader(cfg.WarmRunnerInfo.Maxminddb)
-	if err != nil {
-		libnamed.Logger.Error().Str("log_type", "main").Str("op_type", "geoip2").Err(err).Msg("failed to init geoip2 reader")
-		if cfg.WarmRunnerInfo.Maxminddb != "" {
-			panic(err)
-		}
-	}
-
-	//cfg.Filter.Start()
-
-	// init cache
-	cachex.InitCache(cfg.Server.RrCache.Mode)
-
 	err = runner.ExecStartPre(cfg.RunnerOption.StartPreTimeoutDuration)
 	if err != nil {
-		libnamed.Logger.Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec startPre funcs")
+		xlog.Logger().Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec startPre funcs")
 		panic(err)
 	}
 
@@ -91,18 +64,8 @@ func main() {
 	srv := serverx.NewServerMux()
 	srv.Serve(cfg, &wg)
 
-	// register func which will be call after server shutdown
-	wg.Add(1)
-	srv.RegisterOnShutdown(func() {
-		logEvent := libnamed.Logger.Info().Str("log_type", "main").Str("op_type", "store_warm_cache")
-		start := time.Now()
-		_err := cfg.WarmRunnerInfo.Store(cachex.Store())
-		logEvent.Dur("elapsed_time", time.Since(start)).Err(_err).Msg("")
-		wg.Done()
-	})
-
 	srv.RegisterOnReload(func() error {
-		logEvent := libnamed.Logger.Info().Str("log_type", "main").Str("op_type", "reload")
+		logEvent := xlog.Logger().Info().Str("log_type", "main").Str("op_type", "reload")
 		start := time.Now()
 		cfg := configx.GetGlobalConfig()
 		err := runner.ExecDaemonStop(cfg.RunnerOption.DaemonStopTimeoutDuration)
@@ -126,13 +89,13 @@ func main() {
 
 	err = runner.ExecStartPost(cfg.RunnerOption.StartPostTimeoutDuration)
 	if err != nil {
-		libnamed.Logger.Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec startPost funcs")
+		xlog.Logger().Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec startPost funcs")
 		panic(err)
 	}
 
 	err = runner.ExecDaemonStart(&wg)
 	if err != nil {
-		libnamed.Logger.Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec daemon start funcs")
+		xlog.Logger().Error().Str("log_type", "main").Str("op_type", "runner").Err(err).Msg("exec daemon start funcs")
 		panic(err)
 	}
 
@@ -141,7 +104,7 @@ func main() {
 	signal.Notify(signalChan, signals...)
 	for {
 		sg := <-signalChan
-		logEvent := libnamed.Logger.Info().Str("log_type", "main").Str("signal", sg.String())
+		logEvent := xlog.Logger().Info().Str("log_type", "main").Str("signal", sg.String())
 		if sg == syscall.SIGHUP {
 			logEvent.Str("op_type", "reload")
 			err = srv.Reload()
@@ -150,8 +113,9 @@ func main() {
 			if err != nil {
 				msg = "server reload configuration, failed"
 			}
-			err = runner.ExecDaemonReload(cfg.RunnerOption.DaemonReloadTimeoutDuration)
-			logEvent.AnErr("err_runner_daemon_reload", err)
+
+			//err = runner.ExecDaemonReload(cfg.RunnerOption.DaemonReloadTimeoutDuration)
+			//logEvent.AnErr("err_runner_daemon_reload", err)
 			logEvent.Msg(msg)
 		} else {
 			logEvent.Str("op_type", "shutdown")
@@ -162,7 +126,7 @@ func main() {
 			logEvent.AnErr("err_runner_stop", err)
 
 			// 2. shutdown server
-			ctx, cancel := context.WithTimeout(context.TODO(), cfg.Server.Main.ShutdownDuration)
+			ctx, cancel := context.WithTimeout(context.TODO(), cfg.Global.ShutdownDuration)
 			serr := srv.Shutdown(ctx)
 			cancel()
 			logEvent.AnErr("err_server_shutdown", serr)
@@ -185,5 +149,4 @@ func main() {
 
 	wg.Wait()
 
-	fakeTimer.Stop()
 }

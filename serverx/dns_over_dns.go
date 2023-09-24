@@ -1,11 +1,10 @@
 package serverx
 
 import (
-	"errors"
 	"gnamed/configx"
-	"gnamed/libnamed"
-	"net"
-	"strings"
+	"gnamed/ext/bytespool"
+	"gnamed/ext/types"
+	"gnamed/ext/xlog"
 	"sync"
 	"time"
 
@@ -14,14 +13,19 @@ import (
 	"github.com/miekg/dns"
 )
 
-func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
-	dc := &libnamed.DConnection{
+type dnsServerOpt struct {
+	compress bool
+}
+
+func (ds *dnsServerOpt) handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
+	dc := &types.DConnection{
 		OutgoingMsg: r,
-		Log:         libnamed.Logger.Info(),
+		Log:         xlog.Logger().Info(),
 	}
 
-	clientip, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", w.RemoteAddr().Network()).Str("clientip", clientip)
+	clientip := getAddrIP(w.RemoteAddr())
+	network := w.RemoteAddr().Network()
+	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDNS).Str("network", network).Str("clientip", clientip)
 	start := time.Now()
 
 	cfg := configx.GetGlobalConfig()
@@ -30,24 +34,36 @@ func handleDoDRequest(w dns.ResponseWriter, r *dns.Msg) {
 		logEvent.Err(err)
 	}
 	if rmsg != nil {
-		err = w.WriteMsg(rmsg)
+		rmsg.Compress = ds.compress
+		if network == "udp" && rmsg.IsTsig() == nil {
+			buf, off, reuse, err1 := bytespool.PackMsgWitBufSize(rmsg, 0, bytespool.MaskEncodeWithoutLength)
+			if err1 != nil {
+				logEvent.AnErr("pack_msg_error", err1)
+			} else {
+				// auto add length field in tcp
+				_, err = w.Write(buf[:off])
+				if reuse {
+					bytespool.Put(buf)
+				}
+			}
+		} else {
+			if !rmsg.Compress {
+				rmsg.Compress = rmsg.Len() >= 510
+			}
+			err = w.WriteMsg(rmsg)
+		}
 		logEvent.AnErr("write_error", err)
 	}
 	logEvent.Dur("latency", time.Since(start)).AnErr("server_error", w.Close()).Msg("")
 }
 
-func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoD(listen *configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
-	go func(addr string, network string) {
-		if strings.HasPrefix(network, "udp") {
-			if host, _, err := net.SplitHostPort(listen.Addr); err == nil {
-				_ip := net.ParseIP(host)
-				if _ip != nil && _ip.IsUnspecified() {
-					err := errors.New("listen on unspecified address, packet receive and send address might be different")
-					libnamed.Logger.Warn().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err).Msg("")
-				}
-			}
+	go func() {
+		ds := dnsServerOpt{
+			compress: !listen.DisableCompressMsg,
 		}
+
 		dos := &dns.Server{
 			Addr:          listen.Addr,
 			Net:           listen.Network,
@@ -58,14 +74,13 @@ func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 			WriteTimeout:  listen.Timeout.WriteDuration,
 		}
 		mux := dns.NewServeMux()
-		mux.HandleFunc(".", handleDoDRequest)
+		mux.HandleFunc(".", ds.handleDoDRequest)
 		dos.Handler = mux
-		//dns.HandleFunc(".", handleFunc)
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := dos.Shutdown()
-			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			wg.Done()
 			logEvent.Msg("server has been shutdown")
@@ -76,5 +91,5 @@ func (srv *ServerMux) serveDoD(listen configx.Listen, wg *sync.WaitGroup) {
 			panic(err)
 		}
 
-	}(listen.Addr, listen.Network)
+	}()
 }
