@@ -18,7 +18,7 @@ jobs:
       - name: "Set up Go"
         uses: actions/setup-go@v3
         with: 
-          go-version: "1.20"
+          go-version: "1.21"
       - name: Darwin-Build-Upload
         env:
           CGO_ENABLED: 0
@@ -50,6 +50,28 @@ jobs:
           go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}.exe
           tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/}.exe configx/config.json data/
           rm -f ${GITHUB_REPOSITORY##*/}.exe
+          sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
+      - name: Darwin-Arm-Build-Upload
+        env:
+          CGO_ENABLED: 0
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}
+          tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json data/
+          rm -f ${GITHUB_REPOSITORY##*/}
+          sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
+          bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
+      - name: Linux-Arm-Build-Upload
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -ldflags '-s -w' -o ${GITHUB_REPOSITORY##*/}
+          tar -zcf ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz ${GITHUB_REPOSITORY##*/} configx/config.json data/
+          rm -f ${GITHUB_REPOSITORY##*/}
           sha256sum ${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz >> ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}.sha256sum
           bash ./.github/workflows/upload_asset.sh ./${GITHUB_REPOSITORY##*/}-${GITHUB_REF##*/}-${GOOS}-${GOARCH}.tar.gz $GITHUB_TOKEN
       - name: Upload checksum
