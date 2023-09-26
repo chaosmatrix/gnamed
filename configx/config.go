@@ -12,7 +12,9 @@ import (
 	"gnamed/ext/pool"
 	"gnamed/ext/runner"
 	"gnamed/ext/warm"
+	"gnamed/ext/xhosts"
 	"gnamed/ext/xlog"
+	"gnamed/ext/xrr"
 	"gnamed/ext/xsingleflight"
 	"gnamed/libnamed"
 	"math"
@@ -89,7 +91,7 @@ type Server struct {
 	Listen     []Listen               `json:"listen"`
 	NameServer map[string]*NameServer `json:"nameserver"`
 	View       map[string]*View       `json:"view"`
-	Hosts      []Host                 `json:"hosts"`
+	Hosts      *xhosts.Hosts          `json:"hosts"`
 	RrCache    *cachex.RrCache        `json:"cache"`
 }
 
@@ -397,7 +399,7 @@ type View struct {
 
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
-	RrHTTPS *RrHTTPS `json:"rr_https"`
+	RrHTTPS *xrr.RrHTTPS `json:"rr_https"`
 
 	// cache
 	//RrCache *RrCache `json:"rr_cache"` // view's cache
@@ -406,62 +408,6 @@ type View struct {
 	ecsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
 	ecsAddress net.IP `json:"-"`
 	ecsNetMask uint8  `json:"-"`
-}
-
-// HTTPS RRSet setting
-type RrHTTPS struct {
-	Priority uint16   `json:"priority"`
-	Target   string   `json:"target"`
-	Alpn     []string `json:"alpn"`
-	Hijack   bool     `json:"hijack"` // QType HTTPS will be hijacked with configured
-}
-
-// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
-// fake dns HTTPS RR
-func (h *RrHTTPS) FakeRR(r *dns.Msg, hints []net.IP) dns.RR {
-	if r == nil || len(r.Question) == 0 || r.Question[0].Qtype != dns.TypeHTTPS {
-		return nil
-	}
-
-	rr := new(dns.HTTPS)
-	rr.Priority = h.Priority
-	rr.Target = h.Target
-	rr.Hdr = dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeHTTPS, Class: r.Question[0].Qclass, Ttl: 300}
-
-	if h.Priority > 0 {
-		if len(h.Alpn) > 0 {
-			e := new(dns.SVCBAlpn)
-			e.Alpn = h.Alpn
-			rr.Value = append(rr.Value, e)
-		}
-
-		ipv4hint := new(dns.SVCBIPv4Hint)
-		ipv6hint := new(dns.SVCBIPv6Hint)
-		for _, ip := range hints {
-			ipv4 := ip.To4()
-			if ipv4 != nil {
-				ipv4hint.Hint = append(ipv4hint.Hint, ipv4)
-			} else {
-				ipv6hint.Hint = append(ipv6hint.Hint, ip)
-			}
-		}
-
-		if len(ipv4hint.Hint) > 0 {
-			rr.Value = append(rr.Value, ipv4hint)
-		}
-		if len(ipv6hint.Hint) > 0 {
-			rr.Value = append(rr.Value, ipv6hint)
-		}
-
-	}
-	return rr
-}
-
-// Server -> Hosts
-type Host struct {
-	Name   string `json:"name"`
-	Record string `json:"record"`
-	Qtype  string `json:"qtype"`
 }
 
 // Admin
@@ -702,13 +648,11 @@ func parseConfig(fname string) (*Config, error) {
 		cfg.Server.View[vkFqdn] = vv
 	}
 
-	for i := 0; i < len(cfg.Server.Hosts); i++ {
-		hpny := ""
-		hpny, err = idna.ToASCII(cfg.Server.Hosts[i].Name)
-		if err != nil || len(hpny) == 0 {
-			continue
-		}
-		cfg.Server.Hosts[i].Name = dns.Fqdn(hpny)
+	if cfg.Server.Hosts == nil {
+		cfg.Server.Hosts = new(xhosts.Hosts)
+	}
+	if err = cfg.Server.Hosts.Parse(); err != nil {
+		return cfg, err
 	}
 
 	// verify and defaulting cache configuration options
@@ -815,18 +759,9 @@ func (v *View) parse() error {
 
 	// RrHTTPS
 	if v.RrHTTPS != nil {
-		// rules:
-		// 1. priority == 0 is AliasMode, and must has Target set
-		// 2. if alpn not empty, priority isn't AliasMode, and vice verse
-		if (len(v.RrHTTPS.Target) == 0 || len(v.RrHTTPS.Alpn) > 0) && v.RrHTTPS.Priority <= 0 {
-			v.RrHTTPS.Priority = 1
+		if err := v.RrHTTPS.Parse(); err != nil {
+			return err
 		}
-
-		if v.RrHTTPS.Priority > 0 && len(v.RrHTTPS.Alpn) == 0 {
-			v.RrHTTPS.Alpn = defaultRrHTTPSAlpn
-		}
-
-		v.RrHTTPS.Target = dns.Fqdn(v.RrHTTPS.Target)
 	}
 
 	return nil
@@ -1248,15 +1183,6 @@ func (srv *Server) FindViewNameServers(zone string) map[string]*NameServer {
 		return nss
 	}
 	return nil
-}
-
-func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool) {
-	for _, h := range srv.Hosts {
-		if qtype == h.Qtype && name == h.Name {
-			return h.Record, true
-		}
-	}
-	return "", false
 }
 
 func (dod *DODServer) parse() error {

@@ -183,16 +183,8 @@ func query(dc *types.DConnection, cfg *configx.Config, byPassCache bool) (*dns.M
 	}
 
 	// 4. hosts lookup
-	if record, found := cfg.Server.FindRecordFromHosts(outgoingQname, qtype); found {
+	if rmsg := cfg.Server.Hosts.FakeMsg(r); rmsg != nil {
 		logEvent.Str("query_type", "hosts")
-		rmsg := new(dns.Msg)
-		rmsg.SetReply(r)
-		rrs := strings.Join([]string{qname, "60", dns.ClassToString[r.Question[0].Qclass], qtype, record}, "    ")
-		_rr, _err := dns.NewRR(rrs)
-		if _err != nil {
-			return nil, _err
-		}
-		rmsg.Answer = []dns.RR{_rr}
 		setReply(rmsg, dc.GetIncomingMsg())
 		return rmsg, nil
 	}

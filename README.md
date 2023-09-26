@@ -30,6 +30,7 @@ go build -ldflags '-s -w'
 ```
 
 ## Architecture
+![architecture](docs/gnamed.svg)
 
 ## Usage
 

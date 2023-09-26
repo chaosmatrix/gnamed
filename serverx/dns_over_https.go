@@ -56,7 +56,7 @@ func (ds *dohServerOpt) handleDoHRequest(c *gin.Context) {
 		Log:         xlog.Logger().Info(),
 	}
 	start := time.Now()
-	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH)
+	logEvent := dc.Log.Str("log_type", "server").Str("protocol", configx.ProtocolTypeDoH).Str("proto", c.Request.Proto)
 
 	logEvent.Str("clientip", c.ClientIP()).Str("method", c.Request.Method).Str("accept", c.GetHeader("Accept")).Str("uri", c.Request.URL.RequestURI())
 
