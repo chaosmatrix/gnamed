@@ -30,7 +30,6 @@ go build -ldflags '-s -w'
 ```
 
 ## Architecture
-![architecture](docs/gnamed.png)
 
 ## Usage
 
@@ -93,6 +92,7 @@ $ gnamed
 * [ ] optimization: select lowest rtt record (cdn domain)
 * [x] optimization: log format and fields
 * [ ] optimization: algorithm to get dns response cache ttl
+* [ ] optimization: select server base on latency
 * [x] security: filter by ip or domain, ad or malware https://gitlab.com/malware-filter/urlhaus-filter
 * [ ] privacy: HTTP/TLS Fingerprint (cipher suit order http headers)
 
@@ -113,31 +113,33 @@ $ gnamed
 | Quad9 | DOH/DOT/DNS | https://www.quad9.net/ |
 
 ### RFC
-1. [IANA - dns-parameters](https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml)
-2. [ICANN - DNS-related RFCs with Community Annotations](https://rfc-annotations.research.icann.org/)
-3. [RFC1034 - DOMAIN NAMES - CONCEPTS AND FACILITIES](https://www.rfc-editor.org/rfc/rfc1034)
-4. [RFC1035 - DOMAIN NAMES - IMPLEMENTATION AND SPECIFICATION](https://www.rfc-editor.org/rfc/rfc1035.html)
-5. [RFC1912 - Common DNS Operational and Configuration Errors](https://www.rfc-editor.org/rfc/rfc1912)
-6. [RFC4033 - DNS Security Introduction and Requirements](https://www.rfc-editor.org/rfc/rfc4033.html)
-7. [RFC5625 - DNS Proxy Implementation Guidelines](https://www.rfc-editor.org/rfc/rfc5625.html)
-8. [RFC6840 - Clarifications and Implementation Notes for DNS Security (DNSSEC)](https://www.rfc-editor.org/rfc/rfc6840)
-9. [RFC6891 - Extension Mechanisms for DNS (EDNS(0))](https://www.rfc-editor.org/rfc/rfc6891)
-10. [RFC7766 - DNS Transport over TCP - Implementation Requirements](https://www.rfc-editor.org/rfc/rfc7766)
-11. [RFC7858 - Specification for DNS over Transport Layer Security (TLS)](https://www.rfc-editor.org/rfc/rfc7858.html)
-12. [RFC7871 - Client Subnet in DNS Queries](https://www.rfc-editor.org/rfc/rfc7871)
-13. [RFC7873 - Domain Name System (DNS) Cookies](https://www.rfc-editor.org/rfc/rfc7873)
-14. [RFC8310 - Usage Profiles for DNS over TLS and DNS over DTLS](https://www.rfc-editor.org/rfc/rfc8310)
-15. [RFC8484 - DNS Queries over HTTPS (DoH)](https://datatracker.ietf.org/doc/html/rfc8484)
-16. [RFC8499 - DNS Terminology](https://www.rfc-editor.org/rfc/rfc8499)
-17. [RFC8906 - A Common Operational Problem in DNS Servers: Failure to Communicate](https://www.rfc-editor.org/rfc/rfc8906.html)
-18. [RFC9018 - Interoperable Domain Name System (DNS) Server Cookies](https://www.rfc-editor.org/rfc/rfc9018.html)
-19. [RFC9210 - DNS Transport over TCP - Operational Requirements](https://www.rfc-editor.org/rfc/rfc9210)
-20. [RFC9230 - Oblivious DNS over HTTPS](https://www.rfc-editor.org/rfc/rfc9230.html)
-21. [RFC9250 - DNS over Dedicated QUIC Connections](https://www.rfc-editor.org/rfc/rfc9250)
-22. [Draft-IETF - Service binding and parameter specification via the DNS (DNS SVCB and HTTPS RRs)](https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-12.html)
-23. [RFC8085 - UDP Usage Guidelines](https://www.rfc-editor.org/rfc/rfc8085.html)
-24. [RFC9000 - QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000.html)
-25. [RFC9114 - HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html)
+1. [Draft-IETF - Service binding and parameter specification via the DNS (DNS SVCB and HTTPS RRs)](hhttps://datatracker.ietf.org/doc/draft-ietf-dnsop-svcb-https/)
+2. [IANA - dns-parameters](https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml)
+3. [ICANN - DNS-related RFCs with Community Annotations](https://rfc-annotations.research.icann.org/)
+4. [RFC1034 - DOMAIN NAMES - CONCEPTS AND FACILITIES](https://www.rfc-editor.org/rfc/rfc1034)
+5. [RFC1035 - DOMAIN NAMES - IMPLEMENTATION AND SPECIFICATION](https://www.rfc-editor.org/rfc/rfc1035.html)
+6. [RFC1912 - Common DNS Operational and Configuration Errors](https://www.rfc-editor.org/rfc/rfc1912)
+7. [RFC4033 - DNS Security Introduction and Requirements](https://www.rfc-editor.org/rfc/rfc4033.html)
+8. [RFC4074 - Common Misbehavior Against DNS Queries for IPv6 Addresses](https://www.rfc-editor.org/rfc/rfc4074.html)
+9. [RFC5625 - DNS Proxy Implementation Guidelines](https://www.rfc-editor.org/rfc/rfc5625.html)
+10. [RFC6147 - DNS64: DNS Extensions for Network Address Translation from IPv6 Clients to IPv4 Servers](https://www.rfc-editor.org/rfc/rfc6147.html)
+11. [RFC6840 - Clarifications and Implementation Notes for DNS Security (DNSSEC)](https://www.rfc-editor.org/rfc/rfc6840)
+12. [RFC6891 - Extension Mechanisms for DNS (EDNS(0))](https://www.rfc-editor.org/rfc/rfc6891)
+13. [RFC7766 - DNS Transport over TCP - Implementation Requirements](https://www.rfc-editor.org/rfc/rfc7766)
+14. [RFC7858 - Specification for DNS over Transport Layer Security (TLS)](https://www.rfc-editor.org/rfc/rfc7858.html)
+15. [RFC7871 - Client Subnet in DNS Queries](https://www.rfc-editor.org/rfc/rfc7871)
+16. [RFC7873 - Domain Name System (DNS) Cookies](https://www.rfc-editor.org/rfc/rfc7873)
+17. [RFC8085 - UDP Usage Guidelines](https://www.rfc-editor.org/rfc/rfc8085.html)
+18. [RFC8310 - Usage Profiles for DNS over TLS and DNS over DTLS](https://www.rfc-editor.org/rfc/rfc8310)
+19. [RFC8484 - DNS Queries over HTTPS (DoH)](https://datatracker.ietf.org/doc/html/rfc8484)
+20. [RFC8499 - DNS Terminology](https://www.rfc-editor.org/rfc/rfc8499)
+21. [RFC8906 - A Common Operational Problem in DNS Servers: Failure to Communicate](https://www.rfc-editor.org/rfc/rfc8906.html)
+22. [RFC9000 - QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000.html)
+23. [RFC9018 - Interoperable Domain Name System (DNS) Server Cookies](https://www.rfc-editor.org/rfc/rfc9018.html)
+24. [RFC9114 - HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html)
+25. [RFC9210 - DNS Transport over TCP - Operational Requirements](https://www.rfc-editor.org/rfc/rfc9210)
+26. [RFC9230 - Oblivious DNS over HTTPS](https://www.rfc-editor.org/rfc/rfc9230.html)
+27. [RFC9250 - DNS over Dedicated QUIC Connections](https://www.rfc-editor.org/rfc/rfc9250)
 
 ### Paper
 1. [DNS Rebinding](https://crypto.stanford.edu/dns/dns-rebinding.pdf)
@@ -148,6 +150,7 @@ $ gnamed
 3. [APNIC - are-large-dns-messages-falling-to-bits](https://blog.apnic.net/2021/06/16/are-large-dns-messages-falling-to-bits/)
 4. [Check My DNS](https://cmdns.dev.dns-oarc.net/)
 5. [dnsflagday](https://www.dnsflagday.net/2020/)
+6. [Tranco: A Research-Oriented Top Sites Ranking Hardened Against Manipulation](https://arxiv.org/abs/1806.01156)
 
 ### Data
 ##### Filter Lists
@@ -159,7 +162,8 @@ $ gnamed
 6. https://someonewhocares.org/hosts/zero/hosts
 
 ##### Others
-1. https://publicsuffix.org/list/public_suffix_list.dat
+1. [public suffix list](https://publicsuffix.org/list/public_suffix_list.dat)
+2. [A Research-Oriented Top Sites Ranking Hardened Against Manipulation](https://tranco-list.eu/)
 
 
 # FIXME

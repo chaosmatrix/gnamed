@@ -2,8 +2,10 @@ package cachex
 
 import (
 	"fmt"
-	"gnamed/libnamed"
+	"gnamed/ext/faketimer"
+	"gnamed/ext/runner"
 	"math"
+	"math/rand"
 	"sort"
 	"strconv"
 	"testing"
@@ -25,7 +27,8 @@ func TestSklCache(t *testing.T) {
 	fmt.Printf("[+] test SklCache\n")
 	fmt.Printf("[+]\n")
 
-	sklc := newSklCache(32, 0.5)
+	c := &SklCacheConfig{MaxLevel: 32, Probability: 0.5}
+	sklc := c.newSklCache()
 
 	type testEntry struct {
 		domain string
@@ -35,14 +38,17 @@ func TestSklCache(t *testing.T) {
 		ts     int64
 	}
 
-	fakeTimer := libnamed.NewFakeTimer(1 * time.Second)
-	fakeTimer.Run()
+	fti := faketimer.FakeTimerInfo{Precision: "1s"}
+	if err := fti.Parse(); err != nil {
+		t.Error(err)
+	}
+	defer runner.ExecShutdown(30 * time.Second)
 
-	if diff := time.Now().Unix() - libnamed.GetFakeTimerUnixSecond(); diff > 5 {
+	if diff := time.Now().Unix() - faketimer.GetFakeTimerUnixSecond(); diff > 1 {
 		t.Errorf("[+] FakeTimer return time less than system time %d large than 5s\n", diff)
 	}
 
-	now := libnamed.GetFakeTimerUnixSecond()
+	now := faketimer.GetFakeTimerUnixSecond()
 
 	tes := []testEntry{
 		{
@@ -210,14 +216,14 @@ func TestSklCache(t *testing.T) {
 
 	fmt.Printf("%v\n", sklc.Dump())
 
-	fakeTimer.Stop()
 }
 
 func TestSklCacheRandom(t *testing.T) {
 	size := 1 << 16
 	removePercent := 100 // 1/100
 
-	sklc := newSklCache(32, 0.5)
+	c := &SklCacheConfig{MaxLevel: 32, Probability: 0.5}
+	sklc := c.newSklCache()
 
 	for i := 300; i < size; i++ {
 		ok := sklc.Set(strconv.Itoa(i), uint16(i%32+3), newTestMsgWithString(strconv.Itoa(i)), uint32(i&math.MaxUint32))
@@ -255,7 +261,8 @@ func TestSklCacheRandom(t *testing.T) {
 
 func BenchmarkSklCacheInsert(b *testing.B) {
 
-	sklc := newSklCache(32, 0.5)
+	c := &SklCacheConfig{MaxLevel: 32, Probability: 0.5}
+	sklc := c.newSklCache()
 
 	for i := 300; i < b.N; i++ {
 		sklc.Set(strconv.Itoa(i), 1, newTestMsgWithString(strconv.Itoa(i)), uint32(i&math.MaxUint32))
@@ -312,6 +319,14 @@ func BenchmarkMsgPack(b *testing.B) {
 	}
 }
 
+func BenchmarkMsgPackBuffer(b *testing.B) {
+	msg := newTestMsg()
+	buf := make([]byte, 1500)
+	for i := 0; i < b.N; i++ {
+		msg.PackBuffer(buf)
+	}
+}
+
 func BenchmarkMsgUnpack(b *testing.B) {
 	msg := newTestMsg()
 	bmsg, err := msg.Pack()
@@ -327,5 +342,34 @@ func BenchmarkMsgCopy(b *testing.B) {
 	msg := newTestMsg()
 	for i := 0; i < b.N; i++ {
 		msg.Copy()
+	}
+}
+
+func BenchmarkRandFloat64(b *testing.B) {
+	rd := rand.New(rand.NewSource(time.Now().Unix()))
+	for i := 0; i < b.N; i++ {
+		if rd.Float64() > 0.5 {
+		}
+	}
+}
+
+func BenchmarkRandInt(b *testing.B) {
+	rd := rand.New(rand.NewSource(time.Now().Unix()))
+	for i := 0; i < b.N; i++ {
+		if rd.Intn(100) < 50 {
+		}
+	}
+}
+
+func TestRandFloat64(t *testing.T) {
+	rd := rand.New(rand.NewSource(time.Now().Unix()))
+
+	for i := 0; i < 100; i++ {
+		level := 1
+		for rd.Float64() <= 0.5 && level < 32 {
+			level++
+			//fmt.Printf("[+] %f\n", v)
+		}
+		fmt.Printf("[+] %d\n", level)
 	}
 }

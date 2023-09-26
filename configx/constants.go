@@ -13,31 +13,21 @@ const (
 	ProtocolTypeDoT = "tls-tcp"
 	ProtocolTypeDoQ = "quic"
 
-	CacheModeSkipList  = "skiplist"
-	CacheModeHashTable = "hashtable"
-
 	defaultPortDns   = 53
 	defaultPortDoT   = 853
 	defaultPortDoH   = 443
 	defaultPortDoQ   = 784
 	defaultPortAdmin = 6677
 
-	defaultTimeoutDurationIdle    = 30 * time.Second
+	defaultTimeoutDurationIdle    = 65 * time.Second
 	defaultTimeoutDurationConnect = 2 * time.Second
 	defaultTimeoutDurationRead    = 5 * time.Second
 	defaultTimeoutDurationWrite   = 5 * time.Second
-
-	defaultPoolIdleTimeoutDuration = 30 * time.Second
-	defaultPoolWaitTimeoutDuration = 3 * time.Second
-	defaultPoolSize                = 5
-	defaultPoolQueriesPerConn      = 32
 
 	// edns-client-subnet
 	defaultEcsFamilyIPv4 uint16 = 1
 	defaultEcsFamilyIPv6 uint16 = 2
 	defaultEcsAddress           = ""
-
-	maxCnameCounts = 5
 )
 
 var (

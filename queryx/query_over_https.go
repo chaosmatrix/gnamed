@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/bytespool"
+	"gnamed/ext/types"
 	"io"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,36 +24,7 @@ var (
 	ErrDoHServerFailure = errors.New("doh server response status_code not 2xx")
 )
 
-// against fingerprint
-func setRequestHeader(req *http.Request) {
-	rv := rand.Int() & 7
-	switch rv {
-	case 0, 7:
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set("Pragma", "no-cache")
-		req.Header.Set("Accept-Language", "en-US")
-		req.Header.Add("Accept-Language", "en;q=0.9")
-		req.Header.Set("Dnt", "1")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
-	case 1, 6:
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set("Pragma", "no-cache")
-		req.Header.Set("Accept-Language", "en-US")
-		req.Header.Add("Accept-Language", "en;q=0.5")
-		req.Header.Set("DNT", "1")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
-	case 2, 5:
-		req.Header.Set("Cache-Control", "no-cache")
-		req.Header.Set("Pragma", "no-cache")
-		req.Header.Set("Accept-Language", "en-US")
-		req.Header.Add("Accept-Language", "en;q=0.5")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36")
-	default:
-	}
-}
-
 func clientDo(doh *configx.DOHServer, req *http.Request) (*http.Response, error) {
-	setRequestHeader(req)
 	return doh.GetClient().Do(req)
 }
 
@@ -104,24 +75,48 @@ func queryDoHJson(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event) (
 	defer resp.Body.Close()
 
 	logEvent.Int("status_code", resp.StatusCode).Str("http_version", resp.Proto)
-	if resp.StatusCode == http.StatusForbidden {
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		//
+	case http.StatusForbidden:
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
-	} else if resp.StatusCode != http.StatusOK {
+	default:
 		rmsg.Rcode = dns.RcodeServerFailure
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logEvent.Err(err)
+		} else {
+			logEvent.Bytes("content", body)
+		}
 		return rmsg, ErrDoHServerFailure
 	}
-	body, err := io.ReadAll(resp.Body)
+
+	bodyLen := resp.ContentLength + 2
+	if bodyLen <= 0 {
+		bodyLen = 1500
+	}
+
+	buf, off, reuse, err := bytespool.ReadMsgWitBufSize(resp.Body, int(bodyLen))
+	if reuse {
+		defer func() { bytespool.Put(buf) }()
+	}
 	if err != nil {
 		rmsg.Rcode = dns.RcodeServerFailure
 		return rmsg, err
 	}
+	body := buf[:off]
 
-	var dohJson libnamed.DOHJson
+	var dohJson types.DOHJson
 	err = json.Unmarshal(body, &dohJson)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
+	}
+	if reuse {
+		bytespool.Put(buf)
+		buf = nil
 	}
 
 	/*
@@ -175,11 +170,17 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 	rmsg := new(dns.Msg)
 	rmsg.SetReply(r)
 
-	bmsg, err := r.Pack()
+	//bmsg, err := r.Pack()
+
+	buf, off, reuse, err := bytespool.PackMsgWitBufSize(r, 0, bytespool.MaskEncodeWithoutLength)
 	if err != nil {
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
+	if reuse {
+		defer func() { bytespool.Put(buf) }()
+	}
+	bmsg := buf[:off]
 
 	dohUrl := doh.Url
 	var bodyReader io.Reader
@@ -188,6 +189,9 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 	} else if doh.Method == http.MethodGet {
 		dohUrl = doh.Url + "?dns=" + base64.RawURLEncoding.EncodeToString(bmsg)
 		bodyReader = nil
+	} else {
+		doh.Method = http.MethodPost
+		bodyReader = bytes.NewReader(bmsg)
 	}
 	logEvent.Str("method", doh.Method).Str("doh_url", dohUrl)
 
@@ -196,19 +200,12 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 		rmsg.Rcode = dns.RcodeFormatError
 		return rmsg, err
 	}
-	/*
-		// bug: multi-thread point to same map
-		if len(doh.Headers) != 0 {
-			req.Header = doh.Headers
-		}
-	*/
 
-	for hk, hs := range doh.Headers {
-		for _, hv := range hs {
-			req.Header.Add(hk, hv)
-
-			if http.CanonicalHeaderKey(hk) == "Host" {
-				req.Host = hv
+	for hname, hvalues := range doh.Headers {
+		for _, hvalue := range hvalues {
+			req.Header.Add(hname, hvalue)
+			if hname == "Host" {
+				req.Host = hvalue
 			}
 		}
 	}
@@ -226,30 +223,50 @@ func queryDoHRFC8484(r *dns.Msg, doh *configx.DOHServer, logEvent *zerolog.Event
 		return rmsg, err
 	}
 	defer resp.Body.Close()
+	if reuse {
+		bytespool.Put(buf)
+		buf = nil
+	}
 
 	logEvent.Int("status_code", resp.StatusCode).Str("http_version", resp.Proto)
-	if resp.StatusCode == http.StatusForbidden {
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		//
+	case http.StatusForbidden:
 		rmsg.Rcode = dns.RcodeRefused
 		return rmsg, ErrDoHServerRefused
-	} else if resp.StatusCode != http.StatusOK {
+	default:
 		rmsg.Rcode = dns.RcodeServerFailure
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logEvent.Err(err)
+		} else {
+			logEvent.Bytes("content", body)
+		}
 		return rmsg, ErrDoHServerFailure
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		rmsg.Rcode = dns.RcodeServerFailure
-		return rmsg, err
+	bodyLen := resp.ContentLength + 2
+	if bodyLen <= 0 {
+		bodyLen = 1500
 	}
-	err = rmsg.Unpack(body)
+	rmsg, _, err = bytespool.UnpackMsgWitBufSize(resp.Body, int(bodyLen), bytespool.MaskEncodeWithoutLength)
 	if err != nil {
-		rmsg.Rcode = dns.RcodeFormatError
+		rmsg = newReplyMsgWithRcode(r, dns.RcodeServerFailure)
 		return rmsg, err
 	}
 	return rmsg, err
 }
 
-func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error) {
+func newReplyMsgWithRcode(r *dns.Msg, rcode int) (msg *dns.Msg) {
+	msg = new(dns.Msg)
+	msg.SetReply(r)
+	msg.Rcode = rcode
+	return msg
+}
+
+func queryDoH(dc *types.DConnection, doh *configx.DOHServer) (*dns.Msg, error) {
 
 	r := dc.OutgoingMsg
 	subEvent := dc.SubLog
@@ -272,6 +289,7 @@ func queryDoH(dc *libnamed.DConnection, doh *configx.DOHServer) (*dns.Msg, error
 		err = fmt.Errorf("DOH Format '%s' not support", doh.Format)
 	}
 
+	subEvent.Err(err)
 	subEvent.Dur("latancy", time.Since(start)).Err(err)
 
 	r.Id = oId

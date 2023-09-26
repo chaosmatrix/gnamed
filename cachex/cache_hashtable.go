@@ -1,14 +1,22 @@
 package cachex
 
 import (
-	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/faketimer"
+	"gnamed/ext/xgeoip2"
+	"gnamed/ext/xlog"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/miekg/dns"
 )
+
+type HashTableCacheConfig struct {
+}
+
+func (c *HashTableCacheConfig) Parse() error {
+
+	return nil
+}
 
 type Element struct {
 	key   string
@@ -30,7 +38,7 @@ type Cache struct {
 	cache [][]*Elements
 }
 
-func NewDefaultHashCache() {
+func InitDefaultHashCache() {
 	newHashCache(256)
 }
 
@@ -45,7 +53,7 @@ func NewHashCache(slots int) *Cache {
 
 func newHashCache(slots int) *Cache {
 
-	libnamed.Logger.Trace().Str("log_type", "cache").Str("cache_mode", configx.CacheModeHashTable).Int("slots", slots).Msg("")
+	xlog.Logger().Trace().Str("log_type", "cache").Str("op_type", "new").Str("cache_mode", CacheModeHashTable).Int("slots", slots).Msg("")
 
 	cache := make([][]*Elements, slots)
 	for _i := range cache {
@@ -81,7 +89,7 @@ func (c *Cache) Get(key string, qtype uint16) (*dns.Msg, int64, bool) {
 
 		val := e.value
 		e.reads.Add(1)
-		if libnamed.GetFakeTimerUnixSecond() > e.expiredUTC {
+		if faketimer.GetFakeTimerUnixSecond() > e.expiredUTC {
 			c.cache[i][j].lock.RUnlock()
 			c.Remove(key, qtype)
 			return val.Copy(), e.expiredUTC, false
@@ -117,7 +125,7 @@ func (c *Cache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) bool {
 		key:        key,
 		qtype:      qtype,
 		value:      value,
-		expiredUTC: libnamed.GetFakeTimerUnixSecond() + int64(ttl),
+		expiredUTC: faketimer.GetFakeTimerUnixSecond() + int64(ttl),
 		reads:      reads,
 	}
 	c.cache[i][j].lock.Lock()
@@ -148,15 +156,9 @@ func (c *Cache) Dump() map[string][]uint16 {
 	return res
 }
 
-func (c *Cache) Store() *configx.WarmFormat {
-	wf := new(configx.WarmFormat)
-	wf.Start = time.Now()
+func (c *Cache) Store() StoreElements {
+	ses := make(StoreElements)
 
-	if wf.Elements == nil {
-		wf.Elements = make(map[string]map[uint16]*configx.WarmElement, 3072)
-	}
-
-	wfe := wf.Elements
 	for _, eless := range c.cache {
 		if eless == nil {
 			continue
@@ -166,22 +168,21 @@ func (c *Cache) Store() *configx.WarmFormat {
 			for qname, ele := range eles.element {
 				if ele.extraElement == nil {
 					ele.extraElement = &extraElement{
-						Country: libnamed.GetCountryIsoCodeFromMsg(ele.value),
+						Country: xgeoip2.GetCountryIsoCodeFromMsg(ele.value),
 					}
 				}
-				if wfe[qname] == nil {
-					wfe[qname] = make(map[uint16]*configx.WarmElement, 2)
+				if ses[qname] == nil {
+					ses[qname] = make(map[uint16]*StoreElement, 2)
 				}
-				nwe := &configx.WarmElement{
-					Type:      uint16(ele.qtype),
+				se := &StoreElement{
 					Frequency: int(ele.reads.Load()),
 					Rcode:     ele.value.Rcode,
 					Country:   ele.extraElement.Country,
 				}
-				wfe[qname][ele.qtype] = nwe
+				ses[qname][ele.qtype] = se
 			}
 			eles.lock.RUnlock()
 		}
 	}
-	return wf
+	return ses
 }

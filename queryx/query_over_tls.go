@@ -2,14 +2,15 @@ package queryx
 
 import (
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/types"
 	"time"
 	"unsafe"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 )
 
-func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error) {
+func queryDoT(dc *types.DConnection, dot *configx.DOTServer) (*dns.Msg, error) {
 
 	r := dc.OutgoingMsg
 
@@ -25,9 +26,13 @@ func queryDoT(dc *libnamed.DConnection, dot *configx.DOTServer) (*dns.Msg, error
 	if dot.ConnectionPool != nil {
 		ce, _rtt, cached, _err := dot.ConnectionPool.Get()
 
-		subEvent.Dur("connection_pool_latency", _rtt).Bool("connection_pool_hit", cached).AnErr("connection_pool_error", _err)
+		poolLog := zerolog.Dict().Dur("latency", _rtt).Bool("hit", cached).Err(_err)
+		if ce != nil {
+			poolLog.Uint64("pointer", uint64(uintptr(unsafe.Pointer(&ce))))
+		}
+		subEvent.Dict("pool", poolLog)
+
 		if _err == nil {
-			subEvent.Uint64("connection_pointer", *(*uint64)(unsafe.Pointer(&ce.Conn)))
 			resp, rtt, err = dot.Client.ExchangeWithConn(r, ce.Conn)
 			if err != nil {
 				ce.Conn.Close()

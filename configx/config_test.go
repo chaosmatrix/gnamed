@@ -2,8 +2,10 @@ package configx
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -40,7 +42,85 @@ func TestFindNameServer(t *testing.T) {
 		}
 		//fmt.Printf("[+] domain: '%s' view '%s' nameserver '%s\n", domain, vn, cfg.Server.View[vn].NameServerTag)
 	}
+}
 
+func TestServer(t *testing.T) {
+	views := map[string]*View{
+		".":                {Cname: "", NameServerTags: []string{"tag_default", "tag_default_1"}},
+		"v.":               {Cname: "", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"com.":             {Cname: "", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"example.com.":     {Cname: "", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"www.example.com.": {Cname: "", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"cname.com.":       {Cname: "cname.com.", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"www.cname.com.":   {Cname: "cname.com.", NameServerTags: []string{"tag_com", "tag_com_1"}},
+		"net.":             {Cname: "", NameServerTags: []string{"tag_net", "tag_net_1"}},
+	}
+	nss := map[string]*NameServer{
+		"tag_default":   {},
+		"tag_default_1": {},
+		"tag_com":       {},
+		"tag_com_1":     {},
+		"tag_net":       {},
+		"tag_net_1":     {},
+	}
+	srv := &Server{
+		View:       views,
+		NameServer: nss,
+	}
+
+	type R struct {
+		cname       string
+		zone        string
+		view        *View
+		nameservers map[string]*NameServer
+	}
+	tss := map[string]R{
+		".":                  {cname: "", zone: ".", view: views["."]},
+		"v.":                 {cname: "", zone: "v.", view: views["."]},
+		"m.":                 {cname: "", zone: ".", view: views["."]},
+		"go.dev.":            {cname: "", zone: ".", view: views["."]},
+		"pkg.go.dev.":        {cname: "", zone: ".", view: views["."]},
+		"example-1.com.":     {cname: "", zone: "com.", view: views["com."]},
+		"1-example.com.":     {cname: "", zone: "com.", view: views["com."]},
+		"wwwexample.com.":    {cname: "", zone: "com.", view: views["com."]},
+		"example.com.":       {cname: "", zone: "example.com.", view: views["example.com."]},
+		"www1.example.com.":  {cname: "", zone: "example.com.", view: views["example.com."]},
+		"www.example.com.":   {cname: "", zone: "www.example.com.", view: views["www.example.com."]},
+		"1.www.example.com.": {cname: "", zone: "www.example.com.", view: views["www.example.com."]},
+		"example.net.":       {cname: "", zone: "net.", view: views["net."]},
+		"www.cname.com.":     {cname: "cname.com.", zone: "cname.com.", view: views["cname.com."]},
+		"1.www.cname.com.":   {cname: "cname.com.", zone: "cname.com.", view: views["cname.com."]},
+		"www2.cname.com.":    {cname: "cname.com.", zone: "cname.com.", view: views["cname.com."]},
+		"cname.com.":         {cname: "", zone: "cname.com.", view: views["cname.com."]},
+	}
+
+	for name, ts := range tss {
+		cname, zone, view, nameservers := srv.Find(name)
+		if ts.cname != cname || ts.zone != zone {
+			t.Errorf("[+] bug: name: %s match zone %s, not match zone: %s\n", name, zone, ts.zone)
+		}
+
+		equalNS := true
+		for _, tag := range views[zone].NameServerTags {
+			if nameservers[tag] != nss[tag] {
+				equalNS = false
+				break
+			}
+		}
+
+		if len(views[zone].NameServerTags) != len(nameservers) || !equalNS {
+			t.Errorf("[+] bug: name: %s match nameservers: %s, not match: %s\n", name, view.NameServerTags, views[zone].NameServerTags)
+		}
+
+		cname, vname := srv.FindRealName(name)
+		if cname == name {
+			cname = ""
+		}
+		if ts.cname != cname || ts.zone != vname {
+			t.Errorf("[+] bug: name: %s match zone %s, not match zone: %s\n", name, vname, ts.zone)
+		}
+
+	}
 }
 
 func TestQuicHttp3(t *testing.T) {
@@ -146,4 +226,48 @@ func stringIgnoreCase(s string, t string) bool {
 		}
 	}
 	return true
+}
+
+type Age struct {
+	Age int
+}
+type Name struct {
+	Name string
+}
+type Ev interface {
+	Age | Name
+}
+type S[T Ev] struct {
+	Value string `json:"value"`
+	Ev    T      `json:"-"`
+}
+
+func TestJsonParse(t *testing.T) {
+
+	sj := `{
+		"value": "str",
+		"ev": {"age": 1}
+	}`
+
+	s := &S[Age]{}
+
+	json.Unmarshal([]byte(sj), s)
+	fmt.Printf("%v\n", s.Ev)
+}
+
+func TestNetInterface(t *testing.T) {
+	ifss, err := net.Interfaces()
+	if err != nil {
+		panic(err)
+	}
+	for _, ifs := range ifss {
+		fmt.Printf("%#v\n", ifs)
+		addrs, err := ifs.Addrs()
+		if err != nil {
+			t.Error(err)
+		}
+		for _, addr := range addrs {
+			fmt.Printf("%s\n", addr)
+		}
+	}
 }

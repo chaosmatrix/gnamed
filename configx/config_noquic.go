@@ -14,6 +14,10 @@ import (
 type DOQServer struct {
 }
 
+func (doq *DOQServer) init(nsi *NameServer) {
+	return
+}
+
 // FIXME: dot.Server was a config file, should not be change.
 func (doq *DOQServer) parse() error {
 	return nil
@@ -53,11 +57,11 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 	tr := &http.Transport{
 		DisableCompression: true, // dns message already compress
 		ForceAttemptHTTP2:  true,
-		Proxy:              http.ProxyFromEnvironment,
+		Proxy:              nil,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			d := &net.Dialer{
 				Timeout:       doh.Timeout.ConnectDuration, // connect timeout
-				KeepAlive:     65 * time.Second,
+				KeepAlive:     30 * time.Second,
 				FallbackDelay: -1, // disable DualStack test
 			}
 			conn, err := d.DialContext(ctx, network, addr)
@@ -70,8 +74,8 @@ func (doh *DOHServer) newClient(alpn string) *http.Client {
 			return conn, err
 		},
 		MaxIdleConns:          10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
+		IdleConnTimeout:       doh.Timeout.IdleDuration,
+		TLSHandshakeTimeout:   doh.Timeout.ConnectDuration,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       tlsc,
 	}

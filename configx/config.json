@@ -1,17 +1,16 @@
 {
+    "global": {
+        "log": {"level": "trace"},
+        "singleflight": true
+    },
     "server": {
-        "main": {
-            "logFile": "console:/dev/stderr",
-            "logLevel": "trace",
-            "singleflight": true
-        },
         "listen": [
             {"addr": "127.0.1.2:53", "network": "tcp", "protocol": "dns"},
             {"addr": "127.0.1.2:53", "network": "udp", "protocol": "dns"},
             {"addr": "[::1]:3053", "network": "tcp6", "protocol": "dns"},
             {"addr": "[::1]:3053", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
-            {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
+            {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "minVersion": 1.2}},
             {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}},
             {"addr": "127.0.1.2:3053", "network": "tcp", "protocol": "dns"},
             {"addr": "127.0.1.2:3053", "network": "udp", "protocol": "dns"},
@@ -22,38 +21,41 @@
             {"addr": "127.0.1.2:30784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}}
         ],
         "nameserver": {
-            "tag_doh_cf_json_01": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "method": "GET", "headers": {"content-type": ["application/dns-json"]}, "format": "JSON", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_cf_rfc8484_01": {"protocol": "https", "doh": {"url": "https://1.0.0.1/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1", "keyLogFile": "./data/ssl_session.log"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "60s"}}},
-            "tag_doh_cf_rfc8484_01_one": {"protocol": "https", "doh": {"url": "https://1.1.1.1/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "60s"}}},
-            "tag_dns_adguard": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "udp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "pool": {"idleTimeout": "30s", "Size": 10}}},
-            "tag_dns_adguard_tcp": {"protocol": "dns", "dns": {"server": "94.140.15.15:53", "network": "tcp", "timeout": {"connect": "5s", "read": "5s", "write": "5s"}, "pool": {"idleTimeout": "900s", "Size": 10, "queriesPerConn": 5}, "socketAttr": {"keepAliveInterval": 0, "disableNoDelay": false, "CloseWithRst": false}}},
-            "tag_dot_cf": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_dot_cf_one": {"protocol": "tls-tcp", "dot": {"server": "1.1.1.1:853",  "tls_config": {"serverName": "1.1.1.1"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doq_adguard_filter_01": {"protocol": "quic", "doq": {"server": "94.140.15.15:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doq_adguard_unfiltered_01": {"protocol": "quic", "doq": {"server": "94.140.14.140:784",  "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_adguard_filter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.15.15/dns-query", "http3--": true, "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_doh_adguard_unfilter_rfc8484_01": {"protocol": "https", "doh": {"url": "https://94.140.14.140/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "dns-unfiltered.adguard.com"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
-            "tag_dot_localhost": {"protocol": "tls-tcp", "dot": {"server": "127.0.1.2:853",  "tls_config": {"serverName": "127.0.1.2", "insecure": true}, "timeout": {"connect": "5s", "read": "5s", "write": "5s"}}},
+            "tag_doh_cf_json_01": {"uri": "https://1.1.1.1/dns-query"},
+            "tag_doh_cf_rfc8484_01": {"uri": "https://1.1.1.1/dns-query"},
+            "tag_doh_cf_rfc8484_01_one": {"uri": "https://1.1.1.1/dns-query"},
+
+            "tag_dns_adguard": {"uri": "dns://94.140.15.15:53"},
+            "tag_dns_adguard_tcp": {"uri": "dns://94.140.15.15:53", "extra": {"network": "tcp", "pool": {"size": 5, "requests": 8}}},
+
+            "tag_dot_cf": {"uri": "tls://1.0.0.1:853"},
+            "tag_dot_cf_one": {"uri": "tls://1.1.1.1:853"},
+
+            "tag_doq_adguard_filter_01": {"uri": "quic://94.140.15.15:784"},
+            "tag_doq_adguard_unfiltered_01": {"uri": "quic://94.140.14.140:784"},
             
-            "tag_doh_quad9_ecs_rfc8484": {"protocol": "https", "doh": {"url": "https://9.9.9.9/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "115s"}, "dns_opt": {"dnssec": false, "ecs": false}}},
-            "tag_doh_quad9_ecs_rfc8484_0x1": {"protocol": "https", "doh": {"url": "https://9.9.9.9/dns-query", "method": "POST", "headers": {"content-type": ["application/dns-message"]}, "format": "RFC8484", "externalNameServers": ["8.8.8.8:53"], "tls_config": {"serverName": "9.9.9.9"}, "timeout": {"connect": "5s", "read": "5s", "write": "5s", "idle": "115s"}, "dns_opt": {"dnssec": false, "ecs": false}}},
+            "tag_doh_adguard_filter_rfc8484_01": {"uri": "https://94.140.15.15/dns-query"},
+            "tag_doh_adguard_unfilter_rfc8484_01": {"uri": "https://94.140.14.140/dns-query"},
+
+            "tag_dot_localhost": {"uri": "tls://127.0.1.2:853", "extra": {"tls_config": {"serverName": "127.0.1.2", "insecure": true}}},
             
             "tag_grpc": {"protocol": "grpc", "grpc": {"timeout": {}}}
         },
         "view": {
-            ".": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard", "nameserver_tags": ["tag_doh_cf_rfc8484_01", "tag_dns_adguard", "tag_dns_adguard_tcp"], "dnssec": false, "subnet": "", "rr_https": {"alpn": ["h3", "h2", "http/1.1"]}},
-            "www.bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard", "random_domain": true, "rr_https": {"priority": 0, "target": "https.svc.bing.com"}},
-            "bing.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dns_adguard_tcp"},
-            "twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_json_01", "dnssec": false, "subnet": "1.2.3.4/24"},
-            "www.twitter.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf", "dnssec": false, "subnet": "fe80::215:5dff:fed7:cbfa/64"},
-            "github.io.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01", "cname": "cname.github.io."},
-            "www.github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_cf_rfc8484_01_one"},
-            "github.com.": {"resolve_type": "forward", "nameserver_tag": "tag_dot_cf_one"},
-            "com.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_adguard_filter_rfc8484_01"},
+            ".": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01", "tag_dns_adguard", "tag_dns_adguard_tcp"], "dnssec": false, "subnet": "", "rr_https": {"alpn": ["h3", "h2", "http/1.1"]}},
+            "www.bing.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_dns_adguard"], "random_domain": true, "rr_https": {"priority": 0, "target": "https.svc.bing.com"}},
+            "bing.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_dns_adguard_tcp"], "rr_https": {"priority": 1, "hijack": true}},
+            "twitter.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_json_01"], "dnssec": false, "subnet": "1.2.3.4/24"},
+            "www.twitter.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_dot_cf"], "dnssec": false, "subnet": "2001:4860:4860::8888/128"},
+            "github.io.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01"], "cname": "cname.github.io."},
+            "cname.github.io.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01"], "cname": "cname.github.io."},
+            "www.github.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01_one"]},
+            "github.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_dot_cf_one"]},
+            "com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_adguard_filter_rfc8484_01"]},
+            "jp.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_adguard_unfilter_rfc8484_01"]},
             "google.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01_one"]},
-            "dns.adguard.com.": {"resolve_type": "forward", "nameserver_tag": "tag_doq_adguard_filter_01"},
-            "bing.net.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_quad9_ecs_rfc8484", "rr_https": {"priority": 1, "hijack": true}},
-            "office.net.": {"resolve_type": "forward", "nameserver_tag": "tag_doh_quad9_ecs_rfc8484_0x1"}
+            "dns.adguard.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doq_adguard_filter_01"]},
+            "nginx.org.": {"resolve_type": "forward", "nameserver_tags": ["tag_doq_adguard_filter_01"]}
         },
         "hosts": [
             {"name": "localhost.", "record": "127.0.0.1", "qtype": "A"},
@@ -62,67 +64,81 @@
         "cache": {
             "minTTL": 60,
             "maxTTL": 60,
-            "backGroundUpdate": true,
-            "beforeExpiredSecond": 0,
-            "beforeExpiredPercent": 0.1,
-            "useSteal": true
-        }
-    },
-    "query": {
-        "whitelist": {
-            "A": {
-                "equal": [],
-                "prefix": [],
-                "suffix": [],
-                "contain": [],
-                "regexp": []
-            }
-        },
-        "blacklist": {
-            "A": {
-                "equal": ["test-blacklist.example.com."],
-                "prefix": ["test-blacklist"],
-                "suffix": ["adobe.io."],
-                "contain": [".ad."],
-                "regexp": ["\\d{5,63}"]
-            },
-            "AAAA": {
-                "equal": [],
-                "prefix": [],
-                "suffix": ["adobe.io."],
-                "contain": [".ad."],
-                "regexp": ["\\d{5,63}"]
+            "errTTL": 60,
+            "refreshBeforeExpiredSec": 10,
+            "RefreshBeforeExpiredPercent": 0.1,
+            "useSteal": true,
+            "skiplist": {
+                "maxCount": 10000,
+                "noEviction": true,
+                "maxLevel": 33
             }
         }
     },
     "filter": {
         "background": false,
-        "global": {"path": "./data/filters/"},
+        "global": {"path": "./data/filters/", "blockWithAddressThis": false},
         "timer": "10m",
-        "lists": {
+        "listset": {
             "filter-dan-pollock-hosts": {"filename": "dan-pollock-hosts.txt", "refresh_at_startup": true, "refresh": "5h30m", "syntax": "hosts", "url": "https://someonewhocares.org/hosts/zero/hosts"},
+            "filter-urlhaus-filter-agh": {"filename": "urlhaus-filter-agh.txt"},
+            "filter-oisd_big_abp": {"filename": "oisd_big_abp.txt"},
             "phishing_army_blocklist_extended": {"filename": "phishing_army_blocklist_extended.txt", "refresh_at_startup": true, "refresh": "5h30m", "url": "https://phishing.army/download/phishing_army_blocklist_extended.txt"},
-            "privacy-filter-1hosts-lite": {"filename": "1hosts-lite-domains.txt", "refresh_at_startup": true, "refresh": "5h30m", "url": "https://o0.pages.dev/Lite/domains.txt"}
+            "privacy-filter-1hosts-lite": {"filename": "1hosts-lite-domains.txt", "refresh_at_startup": true, "refresh": "10m", "url": "https://o0.pages.dev/Lite/domains.txt"}
+        },
+        "ruleset": {
+            "allow": {
+                "A": {
+                    "equal": ["allow.example.com."],
+                    "prefix": [],
+                    "suffix": [],
+                    "contain": [],
+                    "regexp": []
+                }
+            },
+            "deny": {
+                "A": {
+                    "equal": ["test-blacklist.example.com."],
+                    "prefix": ["test-blacklist"],
+                    "suffix": ["adobe.io.", "ipv4.example.com."],
+                    "contain": [".ad."],
+                    "regexp": ["\\d{5,63}"]
+                },
+                "PTR": {
+                    "suffix": [".127.in-addr.arpa."]
+                },
+                "AAAA": {
+                    "equal": [],
+                    "prefix": [],
+                    "suffix": ["adobe.io.", "ipv6.example.com."],
+                    "contain": [".ad."],
+                    "regexp": ["\\d{5,63}"]
+                },
+                "ALL": {
+                    "equal": ["all.example.com."]
+                }
+            }
         }
     },
     "admin": {
         "listen": [
-            {"addr": "127.0.1.2:6677", "network": "tcp", "protocol": "http", "tls_config": {}}
+            {"addr": "127.0.1.2:6677", "network": "tcp", "protocol": "http", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}, "timeout": {"write": "60s", "read": "60s", "idle": "30s"}}
         ],
         "auth": {
             "cidr": ["192.168.0.0/16", "10.0.0.1/8", "127.0.0.1/8", "172.16.0.0/12", "7.0.0.0/8"],
             "token": {"user": "password"}
-        }
+        },
+        "enableProfile": true
     },
     "warm": {
         "filename": "./data/warm.json",
-        "delay": "1m",
+        "delay": "30s",
         "interval": "0s",
         "concurrency": 8,
         "frequencyUpTo": 1,
-        "unused_time": "1h",
+        "unusedTime": "10h",
         "NameServerUDP": "127.0.1.2:53",
-        "storeNonWarmUpCache": false,
+        "storeNonWarmUpCache": true,
         "maxminddb": "./data/maxminddb/GeoLite2-Country.mmdb"
     }
 }

@@ -4,11 +4,12 @@ package queryx
 
 import (
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/types"
+	"gnamed/ext/xerrs"
 
 	"github.com/miekg/dns"
 )
 
-func queryDoQ(dc *libnamed.DConnection, doq *configx.DOQServer) (*dns.Msg, error) {
-	return nil, libnamed.ErrDisableQuic
+func queryDoQ(dc *types.DConnection, doq *configx.DOQServer) (*dns.Msg, error) {
+	return nil, xerrs.ErrDisableQuic
 }

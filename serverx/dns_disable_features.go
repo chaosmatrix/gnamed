@@ -4,11 +4,11 @@ package serverx
 
 import (
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/xerrs"
 	"sync"
 )
 
 // Dns-Over-Quic
-func (srv *ServerMux) serveDoQ(listen configx.Listen, wg *sync.WaitGroup) {
-	panic(libnamed.ErrDisableQuic)
+func (srv *ServerMux) serveDoQ(listen *configx.Listen, wg *sync.WaitGroup) {
+	panic(xerrs.ErrDisableQuic)
 }

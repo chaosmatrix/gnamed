@@ -5,122 +5,115 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gnamed/cachex"
+	"gnamed/ext/faketimer"
+	"gnamed/ext/filter"
+	"gnamed/ext/iptree"
+	"gnamed/ext/pool"
+	"gnamed/ext/runner"
+	"gnamed/ext/warm"
+	"gnamed/ext/xlog"
+	"gnamed/ext/xsingleflight"
 	"gnamed/libnamed"
-	"gnamed/runner"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/rs/zerolog"
 	"golang.org/x/net/idna"
 )
 
-type CachePolicyType string
-
-var (
-
-	// QueryList Type
-	QueryListTypeEqual   = "Equal"
-	QueryListTypePrefix  = "Prefix"
-	QueryListTypeSuffix  = "Suffix"
-	QueryListTypeContain = "Contain"
-	QueryListTypeRegexp  = "Regexp"
-)
-
 type globalConfig struct {
-	cfg  *Config
-	lock *sync.Mutex
+	value *atomic.Value
+	lock  *sync.Mutex
 }
 
 var _globalConfig = &globalConfig{}
 
 func InitGlobalConfig(cfg *Config) {
+	v := new(atomic.Value)
+	v.Store(cfg)
 	_globalConfig = &globalConfig{
-		cfg:  cfg,
-		lock: new(sync.Mutex),
+		value: v,
+		lock:  new(sync.Mutex),
 	}
 }
 
 func UpdateGlobalConfig() error {
 
 	// prevent update frequency
-	if time.Since(_globalConfig.cfg.GetTimestamp()) < 10*time.Second {
+	cfg := _globalConfig.value.Load().(*Config)
+	if time.Since(cfg.GetTimestamp()) < 10*time.Second {
 		time.Sleep(10 * time.Second)
 	}
 
 	_globalConfig.lock.Lock()
 	defer _globalConfig.lock.Unlock()
 
-	fname := _globalConfig.cfg.GetFileName()
+	fname := cfg.GetFileName()
 	cfg, err := ParseConfig(fname)
 	if err != nil {
 		return err
 	}
 
-	// update pointer rather than update pointer's value, to achive lock-free
-	_globalConfig.cfg = cfg
+	_globalConfig.value.Store(cfg)
 
 	return err
 }
 
 func GetGlobalConfig() *Config {
-	return _globalConfig.cfg
+	return _globalConfig.value.Load().(*Config)
 }
 
 type Config struct {
-	filename           string               `json:"-"` // current using configuration file name
-	timestamp          time.Time            `json:"-"` // configuration file parse timestamp
-	lock               sync.Mutex           `json:"-"` // internal use, lazy init some values
-	singleflightGroups [][]*libnamed.Group  `json:"-"` // [QCLASS][QTYPE]*libnamed.Group max size 1<<16 * 1<<16
-	Server             Server               `json:"server"`
-	Query              Query                `json:"query"`
-	Admin              Admin                `json:"admin"`
-	Filter             *Filter              `json:"filter"` // filter
-	FallBack           FallBack             `json:"fallback"`
-	WarmRunnerInfo     *WarmRunnerInfo      `json:"warm"`
-	RunnerOption       *runner.RunnerOption `json:"runner"`
+	filename           string                   `json:"-"` // current using configuration file name
+	timestamp          time.Time                `json:"-"` // configuration file parse timestamp
+	lock               sync.Mutex               `json:"-"` // internal use, lazy init some values
+	singleflightGroups [][]*xsingleflight.Group `json:"-"` // [QCLASS][QTYPE]*xsingleflight.Group max size 1<<16 * 1<<16
+	Global             Global                   `json:"global"`
+	Server             Server                   `json:"server"`
+	Admin              Admin                    `json:"admin"`
+	Filter             *filter.Filter           `json:"filter"` // filter
+	WarmRunnerInfo     *warm.WarmRunnerInfo     `json:"warm"`
+	RunnerOption       *runner.RunnerOption     `json:"runner"`
 }
 
 type Server struct {
-	Main       Main                  `json:"main"`
-	Listen     []Listen              `json:"listen"`
-	NameServer map[string]NameServer `json:"nameserver"`
-	View       map[string]View       `json:"view"`
-	Hosts      []Host                `json:"hosts"`
-	RrCache    RrCache               `json:"cache"`
+	Listen     []Listen               `json:"listen"`
+	NameServer map[string]*NameServer `json:"nameserver"`
+	View       map[string]*View       `json:"view"`
+	Hosts      []Host                 `json:"hosts"`
+	RrCache    *cachex.RrCache        `json:"cache"`
 }
 
-type Main struct {
-	// console://
-	// file:/path/log
-	// tcp:127.0.0.1:12345
-	// udp:127.0.0.1:12345
-	// unix:/path/syslog.socket
-	LogFile          string        `json:"logFile"`
-	LogLevel         string        `json:"logLevel"`
-	ShutdownTimeout  string        `json:"shutdown_timeout"`
-	ShutdownDuration time.Duration `json:"-"`
+type Global struct {
+	ShutdownTimeout  string                   `json:"shutdownTimeout"`
+	ShutdownDuration time.Duration            `json:"-"`
+	Log              *xlog.LogConfig          `json:"log"`
+	FakeTimer        *faketimer.FakeTimerInfo `json:"fakeTimer"`
+	DisableFakeTimer bool                     `json:"disableFakeTimer"` // default enable FakeTimer and use default options
 
 	Singleflight bool `json:"singleflight"`
 }
 
 // Server -> Listen
 type Listen struct {
-	Addr           string    `json:"addr"`
-	Network        string    `json:"network"`
-	Protocol       string    `json:"protocol"`
-	DohPath        string    `json:"doh_path"` // doh path, default "/dns-query"
-	TlsConfig      TlsConfig `json:"tls_config"`
-	Timeout        Timeout   `json:"timeout"`
-	QueriesPerConn int       `json:"queriesPerConn"`
+	Addr               string      `json:"addr"`
+	Network            string      `json:"network"`
+	Protocol           string      `json:"protocol"`
+	URLPath            string      `json:"urlPath"` // url path, for dns-over-https default to "/dns-query"
+	TlsConfig          *TlsConfig  `json:"tls_config"`
+	TLSConfig          *tls.Config `json:"-"`
+	Timeout            Timeout     `json:"timeout"`
+	QueriesPerConn     int         `json:"queriesPerConn"`
+	DisableCompressMsg bool        `json:"disableCompressMsg"` // server, default enable compress, else depend on protocol and message size (udp <512, quic/tcp < 1024)
 }
 
 type SocketAttr struct {
@@ -134,10 +127,14 @@ type SocketAttr struct {
 }
 
 type TlsConfig struct {
-	ServerName         string `json:"serverName"`
-	InsecureSkipVerify bool   `json:"insecure"`
-	CertFile           string `json:"certFile"`
-	KeyFile            string `json:"keyFile"`
+	ServerName         string   `json:"serverName"`
+	InsecureSkipVerify bool     `json:"insecure"`
+	CertFile           string   `json:"certFile"`
+	KeyFile            string   `json:"keyFile"`
+	ALPNS              []string `json:"alpns"`
+	RequireClientAuth  bool     `json:"requireClientAuth"`
+	MinVersion         float32  `json:"minVersion"`
+	MaxVersion         float32  `json:"maxVersion"`
 
 	// KeyLogWriter - should not used in production
 	// if not empty, all tls master secrets will be writen into this file,
@@ -147,25 +144,181 @@ type TlsConfig struct {
 
 // Server -> NameServer
 type NameServer struct {
-	Protocol string     `json:"protocol"`
-	Dns      *DODServer `json:"dns,omitempty"`
-	DoT      *DOTServer `json:"dot,omitempty"`
-	DoH      *DOHServer `json:"doh,omitempty"`
-	DoQ      *DOQServer `json:"doq,omitempty"`
+	NameServerInfo
+
+	Protocol string     `json:"-"`
+	Dns      *DODServer `json:"-"`
+	DoT      *DOTServer `json:"-"`
+	DoH      *DOHServer `json:"-"`
+	DoQ      *DOQServer `json:"-"`
+	/*
+		Protocol string     `json:"protocol"`
+		Dns      *DODServer `json:"dns,omitempty"`
+		DoT      *DOTServer `json:"dot,omitempty"`
+		DoH      *DOHServer `json:"doh,omitempty"`
+		DoQ      *DOQServer `json:"doq,omitempty"`
+	*/
+}
+
+type NameServerInfo struct {
+	URI                 string     `json:"uri"`
+	addrs               []string   `json:"-"`
+	Timeout             Timeout    `json:"timeout"`
+	ExternalNameServers []string   `json:"externalNameServers"`
+	Extra               *ExtraInfo `json:"extra"`
+}
+
+type ExtraInfo struct {
+	// default:
+	// 1. dns: udp4 (ipv4-only), will fallback to tcp when necessary
+	// 2. others: ipv4 (ipv4-only)
+	//
+	// dns: to identify using tcp-only or not
+	Network string `json:"network"`
+
+	// tcp-only
+	SocketAttr            *SocketAttr `json:"socketAttr,omitempty"`
+	Pool                  *pool.Pool  `json:"pool"`                  // if nil, use default
+	DisableConnectionPool bool        `json:"disableConnectionPool"` // tcp network will always enable connection pool
+
+	// tls
+	TLSConfig *TlsConfig `json:"tls_config"`
+
+	// quic
+
+	// http
+	HTTP3               bool                `json:"http3"`
+	DisableAttemptHTTP3 bool                `json:"disableAttemptHTTP3"`
+	Method              string              `json:"method"`
+	Headers             map[string][]string `json:"headers"`
+	Format              DOHMsgType          `json:"format"`
+}
+
+func (ns *NameServer) parse() error {
+	network := ""
+	if ns.Extra != nil {
+		network = ns.Extra.Network
+	}
+	addrs, host, err := parseURI(network, ns.URI, ns.ExternalNameServers)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("invalid uri: %s, no valid addresses", ns.URI)
+	}
+	ns.addrs = addrs
+
+	if ns.Extra == nil {
+		ns.Extra = &ExtraInfo{}
+	}
+
+	if ns.Extra.TLSConfig != nil {
+		if ns.Extra.TLSConfig.ServerName == "" {
+			ns.Extra.TLSConfig.ServerName = host
+		}
+	} else {
+		ns.Extra.TLSConfig = &TlsConfig{
+			ServerName: host,
+		}
+	}
+	tlsConf, err := ns.Extra.TLSConfig.parse()
+	if err != nil {
+		return err
+	}
+	if tlsConf.ServerName == "" {
+		tlsConf.ServerName = host
+	}
+
+	colIdx := strings.Index(ns.URI, ":")
+	if colIdx < 0 {
+		colIdx = 0
+	}
+
+	scheme := strings.ToLower(ns.URI[:colIdx])
+	switch scheme {
+	case "https", "http":
+		ns.Protocol = ProtocolTypeDoH
+		ns.DoH = &DOHServer{}
+		ns.DoH.init(ns)
+		err = ns.DoH.parse()
+	case "quic":
+		ns.Protocol = ProtocolTypeDoQ
+		ns.DoQ = &DOQServer{}
+		ns.DoQ.init(ns)
+		err = ns.DoQ.parse()
+	case "tls":
+		ns.Protocol = ProtocolTypeDoT
+		ns.DoT = &DOTServer{}
+		ns.DoT.init(ns)
+		err = ns.DoT.parse()
+	case "dns", "tcp", "udp":
+		ns.Protocol = ProtocolTypeDNS
+		if scheme != "dns" {
+			ns.Extra.Network = scheme
+		}
+		ns.Dns = &DODServer{}
+		ns.Dns.init(ns)
+		err = ns.Dns.parse()
+	default:
+		return fmt.Errorf("invalid uri: %s", ns.URI)
+	}
+
+	return err
+}
+
+func (doh *DOHServer) init(nsi *NameServer) {
+	*doh = DOHServer{
+		Url:                 nsi.addrs[0],
+		Method:              nsi.Extra.Method,
+		Headers:             nsi.Extra.Headers,
+		Format:              nsi.Extra.Format,
+		HTTP3:               nsi.Extra.HTTP3,
+		ExternalNameServers: nsi.ExternalNameServers,
+		TlsConfig:           *nsi.Extra.TLSConfig,
+		Timeout:             nsi.Timeout,
+		SocketAttr:          nsi.Extra.SocketAttr,
+	}
+}
+
+func (dot *DOTServer) init(nsi *NameServer) {
+	*dot = DOTServer{
+		Server:              nsi.addrs[0],
+		Pool:                nsi.Extra.Pool,
+		ExternalNameServers: nsi.ExternalNameServers,
+		TlsConfig:           *nsi.Extra.TLSConfig,
+		Timeout:             nsi.Timeout,
+		SocketAttr:          nsi.Extra.SocketAttr,
+	}
+}
+
+func (dod *DODServer) init(nsi *NameServer) {
+	*dod = DODServer{
+		Server:     nsi.addrs[0],
+		Network:    nsi.Extra.Network,
+		Timeout:    nsi.Timeout,
+		Pool:       nsi.Extra.Pool,
+		SocketAttr: nsi.Extra.SocketAttr,
+	}
+}
+
+type NameServerTyper interface {
+	*DODServer | *DOTServer | *DOHServer | *DOQServer
+	parse() error
 }
 
 type DODServer struct {
 	Server  string `json:"server"`
 	Network string `json:"network"`
 
-	Timeout    Timeout         `json:"timeout"`
-	Pool       *ConnectionPool `json:"pool"`
-	SocketAttr *SocketAttr     `json:"socketAttr,omitempty"`
+	Timeout               Timeout     `json:"timeout"`
+	Pool                  *pool.Pool  `json:"pool"`
+	DisableConnectionPool bool        `json:"disableConnectionPool"` // tcp network will always enable connection pool
+	SocketAttr            *SocketAttr `json:"socketAttr,omitempty"`
 
 	// use internal
 	ClientUDP         *dns.Client                     `json:"-"`
 	ClientTCP         *dns.Client                     `json:"-"`
-	ConnectionPoolTCP *libnamed.ConnectionPool        `json:"-"`
+	ConnectionPoolTCP *pool.ConnectionPool            `json:"-"`
 	NewConn           func(string) (*dns.Conn, error) `json:"-"`
 }
 
@@ -198,8 +351,9 @@ type DOHServer struct {
 }
 
 type DOTServer struct {
-	Server string          `json:"server"`
-	Pool   *ConnectionPool `json:"pool"`
+	Server                string     `json:"server"`
+	Pool                  *pool.Pool `json:"pool"`
+	DisableConnectionPool bool       `json:"disableConnectionPool"` // tcp network will always enable connection pool
 
 	// if "Server" not a ip address, use this nameservers to resolve domain
 	ExternalNameServers []string `json:"externalNameServers"`
@@ -210,7 +364,7 @@ type DOTServer struct {
 
 	// use internal
 	Client         *dns.Client                     `json:"-"`
-	ConnectionPool *libnamed.ConnectionPool        `json:"-"`
+	ConnectionPool *pool.ConnectionPool            `json:"-"`
 	NewConn        func(string) (*dns.Conn, error) `json:"-"`
 }
 
@@ -225,19 +379,9 @@ type Timeout struct {
 	WriteDuration   time.Duration `json:"-"`
 }
 
-type ConnectionPool struct {
-	IdleTimeout         string        `json:"idleTimeout"`
-	idleTimeoutDuration time.Duration `json:"-"`
-	Size                int           `json:"size"`
-	QueriesPerConn      int           `json:"queriesPerConn"`
-}
-
 // Server -> View
 type View struct {
-	ResolveType    string   `json:"resolve_type"`
-	NameServerTag  string   `json:"nameserver_tag"` // deprecated
 	NameServerTags []string `json:"nameserver_tags"`
-	FallBackTags   []string `json:"FallBack_tags"`
 	Cname          string   `json:"cname"`
 	Dnssec         bool     `json:"dnssec"`
 	Subnet         string   `json:"subnet"`
@@ -249,6 +393,8 @@ type View struct {
 	// sometimes can be used to prevent dns hijacking when using dns-over-plain-udp protocol
 	RandomDomain bool `json:"random_domain"` // random Upper/Lower domain's chars
 
+	Compress bool `json:"compress"` // disable compress msg
+
 	// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
 	// WARNING: browser makes A/AAAA and HTTPS record concurrency, only work when HTTPS responsed before A/AAAA
 	RrHTTPS *RrHTTPS `json:"rr_https"`
@@ -257,9 +403,9 @@ type View struct {
 	//RrCache *RrCache `json:"rr_cache"` // view's cache
 
 	// internal: edns-client-subnet, parse from Subnet
-	EcsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
-	EcsAddress net.IP `json:"-"`
-	EcsNetMask uint8  `json:"-"`
+	ecsFamily  uint16 `json:"-"` // 1: ipv4, 2: ipv6
+	ecsAddress net.IP `json:"-"`
+	ecsNetMask uint8  `json:"-"`
 }
 
 // HTTPS RRSet setting
@@ -270,21 +416,45 @@ type RrHTTPS struct {
 	Hijack   bool     `json:"hijack"` // QType HTTPS will be hijacked with configured
 }
 
-// RR Cache
-type RrCache struct {
-	MaxTTL               uint32  `json:"maxTTL"`
-	MinTTL               uint32  `json:"minTTL"`
-	NxMaxTtl             uint32  `json:"nxMaxTtl"` // TTL for NXDOMAIN
-	NxMinTtl             uint32  `json:"nxMinTtl"`
-	ErrTtl               uint32  `json:"errTTL"` // TTL for not NXDomain ERROR
-	Mode                 string  `json:"mode"`
-	UseSteal             bool    `json:"useSteal"`             // use steal cache, when element expired, return and trigger background query
-	BackgroundUpdate     bool    `json:"backGroundUpdate"`     // true if BackgroundUpdate || UseSteal || BeforeExpiredSecond != 0 || BeforeExpiredPercent != 0
-	BeforeExpiredSecond  int64   `json:"beforeExpiredSecond"`  // time.Now().Unix() >= expired - BeforeExpiredSecond, enable background query
-	BeforeExpiredPercent float64 `json:"beforeExpiredPercent"` // time.Now().Unix() >= expired - ttl * BeforeExpiredPercent, enable background query
+// rfc: https://www.ietf.org/archive/id/draft-ietf-dnsop-svcb-https-10.html
+// fake dns HTTPS RR
+func (h *RrHTTPS) FakeRR(r *dns.Msg, hints []net.IP) dns.RR {
+	if r == nil || len(r.Question) == 0 || r.Question[0].Qtype != dns.TypeHTTPS {
+		return nil
+	}
 
-	// internal use
-	backgroundQueryMap *sync.Map `json:"-"`
+	rr := new(dns.HTTPS)
+	rr.Priority = h.Priority
+	rr.Target = h.Target
+	rr.Hdr = dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeHTTPS, Class: r.Question[0].Qclass, Ttl: 300}
+
+	if h.Priority > 0 {
+		if len(h.Alpn) > 0 {
+			e := new(dns.SVCBAlpn)
+			e.Alpn = h.Alpn
+			rr.Value = append(rr.Value, e)
+		}
+
+		ipv4hint := new(dns.SVCBIPv4Hint)
+		ipv6hint := new(dns.SVCBIPv6Hint)
+		for _, ip := range hints {
+			ipv4 := ip.To4()
+			if ipv4 != nil {
+				ipv4hint.Hint = append(ipv4hint.Hint, ipv4)
+			} else {
+				ipv6hint.Hint = append(ipv6hint.Hint, ip)
+			}
+		}
+
+		if len(ipv4hint.Hint) > 0 {
+			rr.Value = append(rr.Value, ipv4hint)
+		}
+		if len(ipv6hint.Hint) > 0 {
+			rr.Value = append(rr.Value, ipv6hint)
+		}
+
+	}
+	return rr
 }
 
 // Server -> Hosts
@@ -294,47 +464,94 @@ type Host struct {
 	Qtype  string `json:"qtype"`
 }
 
-// Query
-type Query struct {
-	// qtype -> QueryList
-	WhiteList map[string]QueryList `json:"whitelist"`
-	BlackList map[string]QueryList `json:"blacklist"`
-}
-
-type QueryList struct {
-	Equal      []string             `json:"equal"`
-	equalMap   map[string]struct{}  `json:"-"`
-	Prefix     []string             `json:"prefix"`
-	prefixTrie *libnamed.PrefixTrie `json:"-"`
-	Suffix     []string             `json:"suffix"`
-	suffixTrie *libnamed.SuffixTrie `json:"-"`
-	Contain    []string             `json:"contain"`
-	Regexp     []string             `json:"regexp"`
-	regexp     []*regexp.Regexp     `json:"-"`
-}
-
 // Admin
 type Admin struct {
-	Listen []Listen `json:"listen"`
-	Auth   Auth     `json:"auth"`
+	Listen        []Listen `json:"listen"`
+	Auth          Auth     `json:"auth"`
+	EnableProfile bool     `json:"enableProfile"`
 }
 
 type Auth struct {
-	Cidr  []string          `json:"cidr"`
-	Token map[string]string `json:"token"` // user:token
+	Cidr   []string          `json:"cidr"`
+	iptree *iptree.IPTree    `json:"-"`
+	Token  map[string]string `json:"token"` // user:token
+}
+
+func (a *Admin) parse() error {
+	for i := range a.Listen {
+		if err := a.Listen[i].parse(); err != nil {
+			return err
+		}
+		if a.EnableProfile {
+			t := a.Listen[i].Timeout
+			logEvent := xlog.Logger().Warn().Str("log_type", "admin").Str("op_type", "parse")
+
+			needLog := false
+			if a.Listen[i].Timeout.WriteDuration < 30*time.Second {
+				a.Listen[i].Timeout.WriteDuration = 30 * time.Second
+				logEvent.Dur("write_timeout", t.WriteDuration)
+				needLog = true
+			}
+			if a.Listen[i].Timeout.IdleDuration < 30*time.Second {
+				a.Listen[i].Timeout.IdleDuration = 30 * time.Second
+				logEvent.Dur("idle_timeout", t.IdleDuration)
+				needLog = true
+			}
+
+			if needLog {
+				logEvent.Msg("enable profile, slice change timeout greater than 30 sec")
+			} else {
+				logEvent.Discard()
+			}
+		}
+	}
+	return a.Auth.parse()
+}
+
+func (a *Auth) parse() error {
+
+	if len(a.Cidr) == 0 {
+		return nil
+	}
+
+	a.iptree = iptree.NewIPTree()
+	for _, v := range a.Cidr {
+		if i := strings.LastIndex(v, "/"); i < 0 {
+			if strings.Contains(v, ":") {
+				v += "/128"
+			} else {
+				v += "/32"
+			}
+		}
+
+		if err := a.iptree.InsertCIDR(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Auth) CheckAllow(user string, token string, clientIP string) error {
+
+	if !(len(a.Token) == 0 || (token != "" && a.Token[user] == token)) {
+		return errors.New("client user and password not allow")
+	}
+
+	if a.iptree == nil {
+		return nil
+	}
+
+	if a.iptree.SearchShortestCIDR(clientIP) != "" {
+		return nil
+	}
+
+	return errors.New("client ip not allow")
 }
 
 func (c *TlsConfig) parse() (*tls.Config, error) {
 	tlsc := &tls.Config{
 		InsecureSkipVerify: c.InsecureSkipVerify,
 		ServerName:         c.ServerName,
-	}
-	if c.CertFile != "" && c.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
-		if err != nil {
-			return tlsc, err
-		}
-		tlsc.Certificates = []tls.Certificate{cert}
 	}
 
 	if c.KeyLogFile != "" {
@@ -365,7 +582,61 @@ func (c *TlsConfig) parse() (*tls.Config, error) {
 	// if want to change the order, use the 3rd-party lib "uTLS" instead
 	tlsc.CipherSuites = cs
 
+	if len(c.ALPNS) != 0 {
+		tlsc.NextProtos = append([]string{}, c.ALPNS...)
+	}
+
+	if c.MinVersion != 0 && c.MaxVersion != 0 && c.MinVersion > c.MaxVersion {
+		return tlsc, fmt.Errorf("tls minVersion %f greater than maxVersion %f", c.MinVersion, c.MaxVersion)
+	}
+
+	if c.MinVersion != 0 {
+		if version, err := getTLSVersion(c.MinVersion); err == nil {
+			tlsc.MinVersion = version
+		} else {
+			return tlsc, err
+		}
+	}
+
+	if c.MaxVersion != 0 {
+		if version, err := getTLSVersion(c.MaxVersion); err == nil {
+			tlsc.MaxVersion = version
+		} else {
+			return tlsc, err
+		}
+	}
+
+	// server side only and must
+	if c.CertFile != "" && c.KeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			return tlsc, err
+		}
+		tlsc.Certificates = []tls.Certificate{cert}
+	}
+
+	if c.RequireClientAuth {
+		tlsc.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
 	return tlsc, nil
+}
+
+func getTLSVersion(vf float32) (uint16, error) {
+	switch vf {
+	case 0:
+		return 0, nil
+	case 1.0:
+		return tls.VersionTLS10, nil
+	case 1.1:
+		return tls.VersionTLS11, nil
+	case 1.2:
+		return tls.VersionTLS12, nil
+	case 1.3:
+		return tls.VersionTLS13, nil
+	default:
+		return 0, fmt.Errorf("invaid tls version %f", vf)
+	}
 }
 
 func ParseConfig(fname string) (*Config, error) {
@@ -386,6 +657,17 @@ func parseConfig(fname string) (*Config, error) {
 	cfg.filename = fname
 	cfg.timestamp = time.Now()
 
+	if err = cfg.Global.parse(); err != nil {
+		return cfg, err
+	}
+
+	if cfg.Global.Singleflight {
+		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
+		// [1<<16][1<<16]*xsingleflight.Group
+		// empty singleflightGroups memory usage: 65536 * sizeof(uintptr) = 65536 * 8 byte = 0.5MB
+		cfg.singleflightGroups = make([][]*xsingleflight.Group, math.MaxUint16+1)
+	}
+
 	for i := 0; i < len(cfg.Server.Listen); i++ {
 		if err = cfg.Server.Listen[i].parse(); err != nil {
 			return cfg, err
@@ -402,7 +684,7 @@ func parseConfig(fname string) (*Config, error) {
 		return cfg, fmt.Errorf("default view \".\" not exist")
 	}
 	for vk, vv := range cfg.Server.View {
-		if err = (&vv).parse(); err != nil {
+		if err = vv.parse(); err != nil {
 			return cfg, err
 		}
 
@@ -429,53 +711,32 @@ func parseConfig(fname string) (*Config, error) {
 		cfg.Server.Hosts[i].Name = dns.Fqdn(hpny)
 	}
 
-	if err = cfg.Server.Main.parse(); err != nil {
-		return cfg, err
-	}
-
-	if cfg.Server.Main.Singleflight {
-		// https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.3
-		// [1<<16][1<<16]*libnamed.Group
-		// empty singleflightGroups memory usage: 65536 * sizeof(uintptr) = 65536 * 8 byte = 0.5MB
-		cfg.singleflightGroups = make([][]*libnamed.Group, math.MaxUint16+1)
-	}
-
 	// verify and defaulting cache configuration options
-	if err = cfg.Server.RrCache.parse(); err != nil {
+	if cfg.Server.RrCache == nil {
+		cfg.Server.RrCache = new(cachex.RrCache)
+	}
+	if err = cfg.Server.RrCache.Parse(); err != nil {
 		return cfg, err
 	}
 
-	if err = cfg.Query.parse(); err != nil {
+	// admin
+	if err = cfg.Admin.parse(); err != nil {
 		return cfg, err
-	}
-
-	// admin cidr
-	for i := 0; i < len(cfg.Admin.Auth.Cidr); i++ {
-		if j := strings.LastIndex(cfg.Admin.Auth.Cidr[i], "/"); j < 0 {
-			cfg.Admin.Auth.Cidr[i] += "/32"
-		}
-
-		var cidr *net.IPNet
-		if _, cidr, err = net.ParseCIDR(cfg.Admin.Auth.Cidr[i]); err == nil {
-			cfg.Admin.Auth.Cidr[i] = cidr.String()
-		} else {
-			fmt.Fprintf(os.Stderr, "[+] invalid cidr %s\n", cfg.Admin.Auth.Cidr[i])
-		}
 	}
 
 	// filter
 	if cfg.Filter == nil {
-		cfg.Filter = new(Filter)
+		cfg.Filter = new(filter.Filter)
 	}
-	if err = cfg.Filter.parse(); err != nil {
+	if err = cfg.Filter.Parse(); err != nil {
 		return cfg, err
 	}
 
 	// warm runner
 	if cfg.WarmRunnerInfo == nil {
-		cfg.WarmRunnerInfo = new(WarmRunnerInfo)
+		cfg.WarmRunnerInfo = new(warm.WarmRunnerInfo)
 	}
-	if err = cfg.WarmRunnerInfo.parse(); err != nil {
+	if err = cfg.WarmRunnerInfo.Parse(); err != nil {
 		return cfg, err
 	}
 	if cfg.WarmRunnerInfo.NameServerUDP == "" {
@@ -517,6 +778,10 @@ func (cfg *Config) GetTimestamp() time.Time {
 
 func (v *View) parse() error {
 
+	if len(v.NameServerTags) == 0 {
+		return fmt.Errorf("no nameserver_tags configuring in view")
+	}
+
 	if v.Cname != "" {
 		v.Cname = dns.Fqdn(v.Cname)
 	}
@@ -539,13 +804,13 @@ func (v *View) parse() error {
 
 		ones, bits := ipNet.Mask.Size()
 		if bits == net.IPv4len*8 {
-			v.EcsAddress = ipNet.IP.To4()
-			v.EcsFamily = defaultEcsFamilyIPv4
+			v.ecsAddress = ipNet.IP.To4()
+			v.ecsFamily = defaultEcsFamilyIPv4
 		} else {
-			v.EcsAddress = ipNet.IP.To16()
-			v.EcsFamily = defaultEcsFamilyIPv6
+			v.ecsAddress = ipNet.IP.To16()
+			v.ecsFamily = defaultEcsFamilyIPv6
 		}
-		v.EcsNetMask = uint8(ones)
+		v.ecsNetMask = uint8(ones)
 	}
 
 	// RrHTTPS
@@ -567,67 +832,54 @@ func (v *View) parse() error {
 	return nil
 }
 
-func (c *RrCache) parse() error {
-	if c.Mode == "" {
-		c.Mode = CacheModeSkipList
-	} else if c.Mode != CacheModeSkipList && c.Mode != CacheModeHashTable {
-		fmt.Fprintf(os.Stderr, "[+] invalid cache mode '%s' not in %v\n", c.Mode, []string{CacheModeSkipList, CacheModeHashTable})
-		return fmt.Errorf("invalid cache mode '%s'", c.Mode)
+func (v *View) SetMsgOpt(msg *dns.Msg) {
+
+	if msg == nil {
+		return
+	}
+	msg.Compress = v.Compress
+
+	if v.RandomDomain && len(msg.Question) > 0 {
+		msg.Question[0].Name = libnamed.RandomUpperDomain(msg.Question[0].Name)
 	}
 
-	if c.MinTTL > c.MaxTTL {
-		fmt.Fprintf(os.Stderr, "[+] invalid MinTTL %d and MaxTTL %d\n", c.MinTTL, c.MaxTTL)
-		return fmt.Errorf("invalid MinTTL %d and MaxTTL %d", c.MinTTL, c.MaxTTL)
+	if v.Subnet != "" || v.Dnssec {
+		opt := new(dns.OPT)
+		opt.Hdr.Name = "."
+		opt.Hdr.Rrtype = dns.TypeOPT
+		opt.SetUDPSize(1280)
+
+		if v.Subnet != "" {
+			ecs := new(dns.EDNS0_SUBNET)
+
+			ecs.Address = v.ecsAddress
+
+			ecs.Family = v.ecsFamily
+			ecs.Code = dns.EDNS0SUBNET
+
+			ecs.SourceNetmask = v.ecsNetMask
+
+			// https://datatracker.ietf.org/doc/html/rfc7871#section-6
+			// SCOPE PREFIX-LENGTH
+			// an unsigned octet representing the leftmost
+			// number of significant bits of ADDRESS that the response covers.
+			// In queries, it MUST be set to 0.
+			ecs.SourceScope = 0
+
+			opt.Option = append(opt.Option, ecs)
+		}
+
+		// send dnssec query to server that don't support dnssec, might be response with FORMERR
+		if v.Dnssec {
+			opt.SetDo()
+		}
+		msg.Extra = append(msg.Extra, opt)
 	}
-
-	if c.NxMinTtl > c.NxMaxTtl {
-		fmt.Fprintf(os.Stderr, "[+] invalid NxMinTtl %d and NxMaxTtl %d\n", c.NxMinTtl, c.NxMaxTtl)
-		return fmt.Errorf("invalid NxMinTtl %d and NxMaxTtl %d", c.NxMinTtl, c.NxMaxTtl)
-	}
-
-	if c.ErrTtl == 0 {
-		c.ErrTtl = 60
-	}
-
-	if c.BeforeExpiredSecond >= int64(c.MaxTTL) {
-		fmt.Fprintf(os.Stderr, "[+] beforeExpiredSecond %d >= MaxTTL %d, do background query every time when cache hit\n", c.BeforeExpiredSecond, c.MaxTTL)
-	}
-
-	if c.BeforeExpiredSecond < 0 {
-		return fmt.Errorf("invalid beforeExpiredSecond %d < 0", c.BeforeExpiredSecond)
-	}
-
-	if c.BeforeExpiredPercent == 1 {
-		fmt.Fprintf(os.Stderr, "[+] beforeExpiredPercent %f, do background query every time when cache hit\n", c.BeforeExpiredPercent)
-	}
-
-	if c.BeforeExpiredPercent > 1 || c.BeforeExpiredPercent < 0 {
-		return fmt.Errorf("invalid beforeExpiredSecond %f, not between [0, 1.0]", c.BeforeExpiredPercent)
-	}
-
-	c.BackgroundUpdate = c.BackgroundUpdate || c.UseSteal || (c.BeforeExpiredSecond > 0) || (c.BeforeExpiredPercent > 0 || c.BeforeExpiredPercent <= 1)
-
-	if c.BackgroundUpdate {
-		c.backgroundQueryMap = new(sync.Map)
-	}
-
-	return nil
-}
-
-// try to get lock about key
-// return false, if key already locked, else return true and lock the key
-func (c *RrCache) BackgroundQueryTryLock(key string) bool {
-	_, loaded := c.backgroundQueryMap.LoadOrStore(key, true)
-	return !loaded
-}
-
-func (c *RrCache) BackgroundQueryUnlock(key string) {
-	c.backgroundQueryMap.Delete(key)
 }
 
 func (l *Listen) parse() error {
 
-	ip, port, err := net.SplitHostPort(l.Addr)
+	host, port, err := net.SplitHostPort(l.Addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[+] listen addr '%s' invalid, error: '%s'\n", l.Addr, err)
 		return err
@@ -636,8 +888,13 @@ func (l *Listen) parse() error {
 	if err != nil || portInt > 65536 || portInt <= 0 {
 		return fmt.Errorf("listen addr '%s' has invalid port, error: '%s'", l.Addr, err)
 	}
-	if _ip := net.ParseIP(ip); _ip == nil {
+
+	ip := net.ParseIP(host)
+	if ip == nil {
 		return fmt.Errorf("listen addr '%s' invalid", l.Addr)
+	} else if ip.IsUnspecified() && (strings.HasPrefix(l.Network, "udp") || l.Protocol == "quic") {
+		err1 := errors.New("listen on unspecified address, packet receive and send address might be different")
+		xlog.Logger().Warn().Str("log_type", "server").Str("protocol", l.Protocol).Str("network", l.Network).Str("addr", l.Addr).Err(err1).Msg("")
 	}
 
 	if l.QueriesPerConn < 0 {
@@ -646,16 +903,30 @@ func (l *Listen) parse() error {
 		l.QueriesPerConn = 1
 	}
 
+	if l.TlsConfig != nil {
+		l.TLSConfig, err = l.TlsConfig.parse()
+		if err != nil {
+			return err
+		}
+	}
+	// must valid tls
+	switch l.Protocol {
+	case "https", "tls", "tcp-tls", "quic":
+		if l.TLSConfig == nil || len(l.TLSConfig.Certificates) == 0 || l.TLSConfig.ServerName != "" || l.TLSConfig.InsecureSkipVerify {
+			return errors.New("listener enable TLS, but no valid TLS Config")
+		}
+	}
+
 	return l.Timeout.parse()
 }
 
-func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.Group {
+func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *xsingleflight.Group {
 	// lazy initialize
 	if len(cfg.singleflightGroups[qclass]) == 0 {
 		cfg.lock.Lock()
 		if len(cfg.singleflightGroups[qclass]) == 0 {
-			cfg.singleflightGroups[qclass] = make([]*libnamed.Group, math.MaxUint16+1)
-			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
+			cfg.singleflightGroups[qclass] = make([]*xsingleflight.Group, math.MaxUint16+1)
+			cfg.singleflightGroups[qclass][qtype] = new(xsingleflight.Group)
 		}
 		cfg.lock.Unlock()
 	}
@@ -669,7 +940,7 @@ func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.G
 		cfg.lock.Lock()
 		if cfg.singleflightGroups[qclass][qtype] == nil {
 			// double check
-			cfg.singleflightGroups[qclass][qtype] = new(libnamed.Group)
+			cfg.singleflightGroups[qclass][qtype] = new(xsingleflight.Group)
 		}
 		cfg.lock.Unlock()
 	}
@@ -677,16 +948,27 @@ func (cfg *Config) GetSingleFlightGroup(qclass uint16, qtype uint16) *libnamed.G
 	return cfg.singleflightGroups[qclass][qtype]
 }
 
-func (mf *Main) parse() error {
-	if mf.LogLevel == "" {
-		mf.LogLevel = zerolog.DebugLevel.String()
+func (g *Global) parse() error {
+	if g.Log == nil {
+		g.Log = new(xlog.LogConfig)
 	}
-	if mf.ShutdownTimeout == "" {
-		mf.ShutdownDuration = 60 * time.Second
+	if err := g.Log.Parse(); err != nil {
+		return err
+	}
+	if g.ShutdownTimeout == "" {
+		g.ShutdownDuration = 60 * time.Second
 	} else {
-		if t, err := time.ParseDuration(mf.ShutdownTimeout); err == nil {
-			mf.ShutdownDuration = t
+		if t, err := time.ParseDuration(g.ShutdownTimeout); err == nil {
+			g.ShutdownDuration = t
 		} else {
+			return err
+		}
+	}
+	if !g.DisableFakeTimer {
+		if g.FakeTimer == nil {
+			g.FakeTimer = &faketimer.FakeTimerInfo{}
+		}
+		if err := g.FakeTimer.Parse(); err != nil {
 			return err
 		}
 	}
@@ -777,77 +1059,204 @@ func newDnsConnection(client *dns.Client, socketAttr *SocketAttr, addr string, n
 	return conn, err
 }
 
-func (cp *ConnectionPool) parse() error {
-	if cp == nil {
-		return errors.New("invalid connection pool config")
-	}
-
-	if cp.Size == 0 {
-		cp.Size = defaultPoolSize
-	}
-
-	if cp.QueriesPerConn == 0 {
-		cp.QueriesPerConn = defaultPoolQueriesPerConn
-	}
-
-	if cp.IdleTimeout == "" {
-		cp.idleTimeoutDuration = defaultPoolIdleTimeoutDuration
-	} else {
-		if d, err := time.ParseDuration(cp.IdleTimeout); err != nil {
-			return err
-		} else {
-			cp.idleTimeoutDuration = d
-		}
-	}
-
-	return nil
-}
-
 func (srv *Server) parse() error {
-	res := true
 
+	if srv.View == nil {
+		return errors.New("no valid view")
+	}
+
+	if _, found := srv.View["."]; !found {
+		return errors.New("default view '.' not exist")
+	}
+
+	if loops, found := hasCnameLoop(srv.View); found {
+		return fmt.Errorf("cname loop exist in view: %s", loops)
+	}
+
+	hasInvalid := false
 	// verify using nameserverTag valid
 	for zone, vi := range srv.View {
 
-		// compitable with old configuration
-		if len(vi.NameServerTags) == 0 && len(vi.NameServerTag) != 0 {
-			vi.NameServerTags = []string{vi.NameServerTag}
-			srv.View[zone] = vi
+		if len(vi.NameServerTags) == 0 {
+			hasInvalid = true
+			fmt.Fprintf(os.Stderr, "[+] View: '%s', hasn't any valid nameserver_tags.\n", zone)
 		}
 
 		for _, nameserverTag := range vi.NameServerTags {
 			if ns, found := srv.NameServer[nameserverTag]; !found {
 				fmt.Fprintf(os.Stderr, "[+] View: '%s', nameserver_tag: '%s' not found.\n", zone, nameserverTag)
-				res = false
+				hasInvalid = true
 			} else {
-				var err error
-
-				switch ns.Protocol {
-				case ProtocolTypeDNS:
-					err = ns.Dns.parse()
-				case ProtocolTypeDoH:
-					err = ns.DoH.parse()
-				case ProtocolTypeDoT:
-					err = ns.DoT.parse()
-				case ProtocolTypeDoQ:
-					err = ns.DoQ.parse()
-				default:
-					fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s' use unsupport protocol '%s'\n", nameserverTag, ns.Protocol)
-					res = false
-				}
-
+				err := ns.parse()
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[+] Nameserver: '%s', parse failed, error: %v\n", nameserverTag, err)
-					res = false
+					hasInvalid = true
 				}
 				srv.NameServer[nameserverTag] = ns
 			}
 		}
 	}
-	if res {
-		return nil
+	if hasInvalid {
+		return errors.New("some View's has invalid nameserver_tag")
 	}
-	return errors.New("some View's has invalid nameserver_tag")
+	return nil
+}
+
+// detect cname loop in view, for example:
+// A -> B -> C -> B
+func hasCnameLoop(views map[string]*View) (string, bool) {
+	for _, view := range views {
+		if view.Cname == "" {
+			continue
+		}
+
+		cname := view.Cname
+		m := make(map[string]bool)
+		m[cname] = true
+
+		loops := cname
+		for cname != "" && len(m) <= 5 {
+			nextCname := findNextCname(cname, views)
+			if cname == nextCname {
+				break
+			}
+			loops += " -> " + nextCname
+			if m[nextCname] {
+				return loops, true
+			}
+			m[nextCname] = true
+
+			cname = nextCname
+		}
+
+		if len(m) >= 5 {
+			return loops + " reach cname loop limit >= 5", false
+		}
+	}
+	return "", false
+}
+
+// find the name's next cname in view
+func findNextCname(name string, views map[string]*View) string {
+
+	i := 0
+	for i < len(name) {
+		if view, found := views[name[i:]]; found {
+			return view.Cname
+		}
+		for ; i < len(name) && name[i] != '.'; i++ {
+		}
+		i++
+	}
+	return ""
+}
+
+// caller must ensure that there is no cname-loop in view
+func (srv *Server) Find(name string) (cname string, zone string, view *View, nameservers map[string]*NameServer) {
+
+	if len(name) == 0 {
+		return
+	}
+
+	cname = ""
+	zone = "."
+
+	currName := name
+	i := 0
+	for {
+		if i >= len(currName) {
+			// should not here
+			break
+		}
+		if v, found := srv.View[currName[i:]]; found {
+			if v.Cname != "" && v.Cname != currName {
+				cname = v.Cname
+				currName = cname
+				i = 0
+				continue
+			} else {
+				zone = currName[i:]
+				view = v
+				break
+			}
+		}
+		for ; i < len(currName)-2 && currName[i] != '.'; i++ {
+		}
+		i++
+	}
+
+	if view == nil {
+		return
+	}
+
+	nameservers = make(map[string]*NameServer)
+	for _, tag := range view.NameServerTags {
+		if ns, found := srv.NameServer[tag]; found {
+			nameservers[tag] = ns
+		}
+	}
+	return cname, zone, view, nameservers
+}
+
+// return cname, name's longest equal view's name
+func (srv *Server) FindRealName(name string) (cname string, zone string) {
+
+	cname = ""
+	zone = "."
+	currName := name
+	i := 0
+	for {
+		if i >= len(currName) {
+			// should not here
+			break
+		}
+		if v, found := srv.View[currName[i:]]; found {
+			if v.Cname != "" && v.Cname != currName {
+				cname = v.Cname
+				currName = cname
+				i = 0
+				continue
+			} else {
+				zone = currName[i:]
+				break
+			}
+		}
+		for ; i < len(currName)-2 && currName[i] != '.'; i++ {
+		}
+		i++
+	}
+
+	return cname, zone
+}
+
+func (srv *Server) FindViewWithZone(zone string) *View {
+	if v, found := srv.View[zone]; found {
+		return v
+	}
+	return nil
+}
+
+// {nameserver_tag: nameserver}
+func (srv *Server) FindViewNameServers(zone string) map[string]*NameServer {
+	if vi, found := srv.View[zone]; found {
+		nss := make(map[string]*NameServer)
+		for _, tag := range vi.NameServerTags {
+			if ns, exist := srv.NameServer[tag]; exist {
+				nss[tag] = ns
+			}
+		}
+		return nss
+	}
+	return nil
+}
+
+func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool) {
+	for _, h := range srv.Hosts {
+		if qtype == h.Qtype && name == h.Name {
+			return h.Record, true
+		}
+	}
+	return "", false
 }
 
 func (dod *DODServer) parse() error {
@@ -911,29 +1320,30 @@ func (dod *DODServer) parse() error {
 		}
 	}
 
-	if dod.Network == "tcp" && dod.Pool != nil {
-		if err := dod.Pool.parse(); err != nil {
+	if dod.Network == "tcp" && (!dod.DisableConnectionPool || dod.Pool != nil) {
+		if dod.Pool == nil {
+			dod.Pool = &pool.Pool{}
+		}
+
+		if err := dod.Pool.Parse(); err != nil {
 			return err
 		}
 		// only tcp enable connection pool
-		cpf := &libnamed.ConnectionPool{
-			MaxConn: dod.Pool.Size,
-			MaxReqs: dod.Pool.QueriesPerConn,
-			NewConn: func() (*dns.Conn, error) {
-				return dod.NewConn("tcp")
-			},
-			CloseConn: func(conn *dns.Conn) error {
-				if conn == nil {
-					return nil
-				}
-				return conn.Close()
-			},
-			IdleTimeout: dod.Pool.idleTimeoutDuration,
+		newConn := func() (*dns.Conn, error) {
+			return dod.NewConn("tcp")
 		}
-		cpt, err := libnamed.NewConnectionPool(cpf)
+		closeConn := func(conn *dns.Conn) error {
+			if conn == nil {
+				return nil
+			}
+			return conn.Close()
+		}
+
+		cpt, err := dod.Pool.NewConnectionPool(newConn, closeConn)
 		if err != nil {
 			return err
 		}
+		xlog.Logger().Info().Str("log_type", "connection_pool").Str("op_type", "new").Str("protocol", "tcp").Str("server", dod.Server).Int("size", dod.Pool.Size).Int("requests", dod.Pool.Requests).Msg("")
 		dod.ConnectionPoolTCP = cpt
 	}
 	return nil
@@ -945,6 +1355,13 @@ func (doh *DOHServer) parse() error {
 	// process header
 	for hk, hm := range doh.Headers {
 		hkc := http.CanonicalHeaderKey(hk)
+		switch hkc {
+		case "Host", "User-Agent":
+			if len(hm) > 1 {
+				return fmt.Errorf("http header '%s' has more than one values: %s", hkc, hm)
+			}
+		default:
+		}
 		if hkc != hk {
 			delete(doh.Headers, hk)
 			doh.Headers[hkc] = hm
@@ -975,7 +1392,10 @@ func (doh *DOHServer) parse() error {
 		qname := dns.Fqdn(host)
 		addr := ""
 		if libnamed.ValidateDomain(qname) {
-			addr = lookupIP(qname, doh.ExternalNameServers)
+			addrs := lookupIPs("ipv4", qname, doh.ExternalNameServers)
+			if len(addrs) > 0 {
+				addr = addrs[0]
+			}
 		}
 
 		if addr == "" {
@@ -989,6 +1409,26 @@ func (doh *DOHServer) parse() error {
 		}
 
 		doh.Url = urlStruct.String()
+	}
+
+	if doh.Format == "" && len(doh.Headers["content-type"]) == 0 {
+		cts := doh.Headers["content-type"]
+		if len(cts) != 0 {
+			switch cts[0] {
+			case DOHAccetpHeaderTypeRFC8484:
+				doh.Format = DOHMsgTypeRFC8484
+			case DOHAcceptHeaderTypeJSON:
+				doh.Format = DOHMsgTypeJSON
+			default:
+				doh.Format = DOHMsgTypeRFC8484
+			}
+		} else {
+			doh.Format = DOHMsgTypeRFC8484
+		}
+	}
+
+	if doh.Method == "" {
+		doh.Method = http.MethodPost
 	}
 
 	doh.Timeout.parse()
@@ -1031,28 +1471,29 @@ func (dot *DOTServer) parse() error {
 		return newDnsConnection(dot.Client, dot.SocketAttr, dot.Server, dot.Client.Net)
 	}
 
-	if dot.Pool != nil {
-		if err := dot.Pool.parse(); err != nil {
+	if !dot.DisableConnectionPool || dot.Pool != nil {
+		if dot.Pool == nil {
+			dot.Pool = &pool.Pool{}
+		}
+		if err := dot.Pool.Parse(); err != nil {
 			return err
 		}
-		cpf := &libnamed.ConnectionPool{
-			MaxConn: dot.Pool.Size,
-			MaxReqs: dot.Pool.QueriesPerConn,
-			NewConn: func() (*dns.Conn, error) {
-				return dot.NewConn("tcp-tls")
-			},
-			CloseConn: func(conn *dns.Conn) error {
-				if conn == nil {
-					return nil
-				}
-				return conn.Close()
-			},
-			IdleTimeout: dot.Pool.idleTimeoutDuration,
+
+		newConn := func() (*dns.Conn, error) {
+			return dot.NewConn("tcp-tls")
 		}
-		cpt, err := libnamed.NewConnectionPool(cpf)
+		closeConn := func(conn *dns.Conn) error {
+			if conn == nil {
+				return nil
+			}
+			return conn.Close()
+		}
+
+		cpt, err := dot.Pool.NewConnectionPool(newConn, closeConn)
 		if err != nil {
 			return err
 		}
+		xlog.Logger().Info().Str("log_type", "connection_pool").Str("op_type", "new").Str("protocol", "tcp").Str("server", dot.Server).Int("size", dot.Pool.Size).Int("requests", dot.Pool.Requests).Msg("")
 		dot.ConnectionPool = cpt
 	}
 	return nil
@@ -1069,257 +1510,161 @@ func parseServer(server string, nameservers []string, defaultPort int) (string, 
 
 	if net.ParseIP(host) == nil {
 		if libnamed.ValidateDomain(host) {
-			addr := lookupIP(dns.Fqdn(host), nameservers)
-			if len(addr) == 0 {
+			addrs := lookupIPs("ipv4", dns.Fqdn(host), nameservers)
+			if len(addrs) == 0 {
 				return server, host, fmt.Errorf("server '%s' no valid ip address found", server)
 			}
-			server = net.JoinHostPort(addr, port)
+			server = net.JoinHostPort(addrs[0], port)
 		}
 	}
 
 	return server, host, err
 }
 
-func lookupIP(name string, nameservers []string) string {
+// return: addrs, host, error
+func parseURI(network string, uri string, nameservers []string) ([]string, string, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return []string{}, "", err
+	}
+
+	var addrs []string
+	hostname := u.Hostname()
+	if ip := net.ParseIP(hostname); ip != nil {
+		addrs = append(addrs, hostname)
+	} else {
+		addrs = lookupIPs(network, hostname, nameservers)
+	}
+	port := u.Port()
+	if port != "" {
+		for i := range addrs {
+			addrs[i] = net.JoinHostPort(addrs[i], port)
+		}
+	}
+
+	switch strings.ToLower(u.Scheme) {
+	case "https", "http":
+		for i := range addrs {
+			u.Host = addrs[i]
+			addrs[i] = u.String()
+		}
+	case "quic":
+		if port == "" {
+			for i := range addrs {
+				addrs[i] = net.JoinHostPort(addrs[i], strconv.Itoa(defaultPortDoQ))
+			}
+		}
+	case "dns":
+		if port == "" {
+			for i := range addrs {
+				addrs[i] = net.JoinHostPort(addrs[i], strconv.Itoa(defaultPortDns))
+			}
+		}
+	case "tls":
+		if port == "" {
+			for i := range addrs {
+				addrs[i] = net.JoinHostPort(addrs[i], strconv.Itoa(defaultPortDoT))
+			}
+		}
+	default:
+		err = fmt.Errorf("invalid uri: %s, unsupport scheme", uri)
+	}
+
+	return addrs, hostname, err
+}
+
+func lookupIPs(network string, name string, nameservers []string) []string {
+	if network == "" {
+		network = "ipv4"
+	}
+
+	res := []string{}
+	switch network[0] {
+	case '4':
+		res = lookupWithQtype(name, dns.TypeA, nameservers)
+	case '6':
+		res = lookupWithQtype(name, dns.TypeAAAA, nameservers)
+	default:
+		lock := new(sync.Mutex)
+		qtypes := []uint16{dns.TypeA, dns.TypeAAAA}
+		var wg sync.WaitGroup
+		for i := range qtypes {
+			wg.Add(1)
+			go func(qtype uint16) {
+				ips := lookupWithQtype(name, qtype, nameservers)
+				lock.Lock()
+				// make sure ipv4 first
+				if qtype == dns.TypeA && len(res) > 0 {
+					res = append(ips, res...)
+				} else {
+					res = append(res, ips...)
+				}
+				lock.Unlock()
+				wg.Done()
+			}(qtypes[i])
+		}
+		wg.Wait()
+	}
+
+	if len(res) == 0 {
+		err := fmt.Errorf("domain %s hasn't any valid addresses", name)
+		xlog.Logger().Error().Str("log_type", "main").Str("op_type", "lookupIP").Str("name", name).Strs("nameservers", nameservers).Str("network", network).Err(err).Msg("")
+	}
+
+	return res
+}
+
+func lookupWithQtype(name string, qtype uint16, nameservers []string) []string {
 	nss := nameservers
 	if len(nss) == 0 {
 		nss = defaultExternalNameServers
 	}
-	for _, ns := range nss {
-		for _, network := range []string{"udp", "tcp"} {
-			r := new(dns.Msg)
-			r.SetQuestion(dns.Fqdn(name), dns.TypeA)
-			client := dns.Client{
-				Timeout: 5 * time.Second,
-				UDPSize: 1280,
-				Net:     network,
-			}
-			if resp, _, err := client.Exchange(r, ns); err == nil {
-				for _, ans := range resp.Answer {
-					if a, ok := ans.(*dns.A); ok {
-						return a.A.String()
+
+	ch := make(chan []string, len(nss))
+
+	for i := range nss {
+		go func(addr string) {
+			for _, network := range []string{"udp", "tcp"} {
+				client := &dns.Client{
+					Net:     network,
+					UDPSize: 1280,
+					Timeout: 5 * time.Second,
+				}
+				r := new(dns.Msg)
+				r.SetQuestion(dns.Fqdn(name), qtype)
+				r, _, err := client.Exchange(r, addr)
+				if err != nil {
+					xlog.Logger().Error().Str("log_type", "init").Str("op_type", "lookupIP").Str("name", name).Uint16("qtype", qtype).Str("nameserver", addr).Err(err).Msg("")
+					ch <- []string{}
+					return
+				}
+				if r != nil && r.Truncated {
+					continue
+				}
+				res := []string{}
+				for _, ans := range r.Answer {
+					rrType := ans.Header().Rrtype
+					if rrType == dns.TypeA {
+						if a, ok := ans.(*dns.A); ok {
+							res = append(res, a.A.String())
+						}
+					} else if rrType == dns.TypeAAAA {
+						if aaaa, ok := ans.(*dns.AAAA); ok {
+							res = append(res, aaaa.String())
+						}
 					}
 				}
+				ch <- res
+
 				break
-			} else {
-				fmt.Fprintf(os.Stderr, "[+] resolve domain '%s' from '%s' via '%s' failed, error: '%s'\n", name, ns, network, err)
 			}
-		}
+		}(nss[i])
 	}
 
-	return ""
-}
-
-const constQueryQtypeALL string = "ALL" // special qtype to identify all dns qtype
-
-// parse contruct QueryList
-func (q *Query) parse() error {
-
-	err := contructQueryList(q.BlackList)
-	if err != nil {
-		return err
+	res := []string{}
+	for i := 0; i < cap(ch); i++ {
+		addrs := <-ch
+		res = append(res, addrs...)
 	}
-	err = contructQueryList(q.WhiteList)
-
-	return err
-}
-
-// TODO: should not skip invalid rule
-func contructQueryList(qm map[string]QueryList) error {
-	var err error
-
-	for qt, ql := range qm {
-		t := strings.ToUpper(qt)
-		if _, found := dns.StringToType[t]; !found && t != constQueryQtypeALL {
-			libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Msgf("invalid qtype %s", qt)
-			return fmt.Errorf("skip invalid qtype %s", qt)
-		}
-
-		// pre process input
-		for i, s := range ql.Equal {
-			s, err = idna.ToASCII(ql.Equal[i])
-			if err != nil || len(s) == 0 {
-				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid equal rule '%s'", ql.Equal[i])
-				if err == nil {
-					return fmt.Errorf("invalid equal rule '%s'", ql.Equal[i])
-				}
-				return err
-			}
-			ql.Equal[i] = dns.Fqdn(s)
-		}
-		for i, s := range ql.Suffix {
-			s, err = idna.ToASCII(ql.Suffix[i])
-			if err != nil || len(s) == 0 {
-				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid suffix rule '%s'", ql.Suffix[i])
-				if err == nil {
-					return fmt.Errorf("invalid suffix rule '%s'", ql.Equal[i])
-				}
-				return err
-			}
-			ql.Suffix[i] = dns.Fqdn(s)
-		}
-		for i, s := range ql.Prefix {
-			s, err = idna.ToASCII(ql.Prefix[i])
-			if err != nil || len(s) == 0 {
-				libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid prefix rule '%s'", ql.Prefix[i])
-				if err == nil {
-					return fmt.Errorf("invalid prefix rule '%s'", ql.Equal[i])
-				}
-				return err
-			}
-			ql.Prefix[i] = s
-		}
-
-		// build internal using data struct
-		ql.equalMap = make(map[string]struct{}, len(ql.Equal))
-		for _, rl := range ql.Equal {
-			ql.equalMap[rl] = struct{}{}
-		}
-		ql.prefixTrie = libnamed.NewPrefixTrie(ql.Prefix)
-		ql.suffixTrie = libnamed.NewSuffixTrie(ql.Suffix)
-
-		if len(ql.Regexp) > 0 {
-			// pre-compile regexp
-			ql.regexp = make([]*regexp.Regexp, len(ql.Regexp))
-			for i := range ql.Regexp {
-				ql.regexp[i], err = regexp.Compile(ql.Regexp[i])
-				if err != nil {
-					libnamed.Logger.Error().Str("log_type", "config").Str("op_type", "contruct_query_list").Err(err).Msgf("invalid regexp rule '%s'", ql.Regexp[i])
-					return err
-				}
-			}
-		}
-
-		qm[t] = ql
-	}
-	return err
-}
-
-// return (cname, vname), if cname exist, else name
-func (srv *Server) FindRealName(name string) (string, string) {
-	idx := 0
-
-	cnameCount := 0
-	for i := 0; i < 255; i++ {
-		if vi, found := srv.View[name[idx:]]; found {
-			if len(vi.Cname) != 0 && name != vi.Cname && cnameCount < maxCnameCounts {
-				name = vi.Cname
-				idx = 0
-				cnameCount++
-				continue
-			} else {
-				return name, name[idx:]
-			}
-		}
-
-		idx = strings.Index(name[idx:], ".") + idx
-		if idx < len(name)-1 {
-			idx++
-		} else {
-			break
-		}
-	}
-	return name, "."
-}
-
-// {nameserver_tag: nameserver}
-func (srv *Server) FindViewNameServers(vname string) map[string]*NameServer {
-	if vi, found := srv.View[vname]; found && vi.ResolveType != ResolveTypeLocal {
-
-		nss := make(map[string]*NameServer)
-		for _, tag := range vi.NameServerTags {
-			if ns, exist := srv.NameServer[tag]; exist {
-				nss[tag] = &ns
-			}
-		}
-		return nss
-	}
-	return nil
-}
-
-// request domain should first call `FindRealName` to get vname (after cname loop if exist)
-// vname was the last viewName, ignore rest cname event exist (alreay reach MaxCnameCounts)
-func (srv *Server) FindViewNameServer(vname string) (string, *NameServer) {
-	if vi, found := srv.View[vname]; found && vi.ResolveType != ResolveTypeLocal {
-		if ns, exist := srv.NameServer[vi.NameServerTag]; exist {
-			return vi.NameServerTag, &ns
-		}
-	}
-	return "", nil
-}
-
-// input original name, not vname
-func (srv *Server) FindNameServer(name string) (string, *NameServer) {
-	_, vname := srv.FindRealName(name)
-	return srv.FindViewNameServer(vname)
-}
-
-func (srv *Server) FindRecordFromHosts(name string, qtype string) (string, bool) {
-	for _, h := range srv.Hosts {
-		if qtype == h.Qtype && name == h.Name {
-			return h.Record, true
-		}
-	}
-	return "", false
-}
-
-// QueryList Match
-func (q *Query) QueryForbidden(name string, qtype string) (string, string, bool) {
-	if ruleType, ruleStr, found := q.MatchWhitlist(name, qtype); found {
-		return ruleType, ruleStr, false
-	}
-	if ruleType, ruleStr, found := q.MatchBlacklist(name, qtype); found {
-		return ruleType, ruleStr, true
-	}
-	return "", "", false
-}
-
-func (q *Query) MatchWhitlist(name string, qtype string) (string, string, bool) {
-	if ql, found := q.WhiteList[qtype]; found {
-		return ql.Match(name)
-	}
-	if ql, found := q.WhiteList[constQueryQtypeALL]; found {
-		return ql.Match(name)
-	}
-	return "", "", false
-}
-
-func (q *Query) MatchBlacklist(name string, qtype string) (string, string, bool) {
-	if ql, found := q.BlackList[qtype]; found {
-		return ql.Match(name)
-	}
-	if ql, found := q.BlackList[constQueryQtypeALL]; found {
-		return ql.Match(name)
-	}
-	return "", "", false
-}
-
-func (ql *QueryList) Match(name string) (string, string, bool) {
-	// O(1)
-	if _, found := ql.equalMap[name]; found {
-		return QueryListTypeEqual, name, true
-	}
-	// O(m)
-	if rule, found := ql.suffixTrie.Query(name); found {
-		return QueryListTypeSuffix, rule, found
-	}
-	// O(m)
-	if rule, found := ql.prefixTrie.Query(name); found {
-		return QueryListTypePrefix, rule, found
-	}
-	// len(ql.Contain) * O(avg(len(_contain)))
-	// Optimization: Aho-Corasick or flashtext
-	// flashtext https://arxiv.org/pdf/1711.00046.pdf
-	for _, rule := range ql.Contain {
-		if strings.Contains(name, rule) {
-			return QueryListTypeContain, rule, true
-		}
-	}
-	// O(m) * O(len(_ql.regexp))
-	for _, rule := range ql.regexp {
-		if rule.MatchString(name) {
-			return QueryListTypeRegexp, rule.String(), true
-		}
-	}
-	return "", "", false
+	return res
 }

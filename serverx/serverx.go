@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/xlog"
 )
 
 var (
@@ -14,7 +14,7 @@ var (
 )
 
 const (
-	envGinDisableLog = "GIN_DISABLELOG"
+	envGinEnableLog = "GIN_ENABLELOG"
 )
 
 type ServerMux struct {
@@ -90,28 +90,21 @@ func (srv *ServerMux) Serve(config *configx.Config, wg *sync.WaitGroup) {
 	sls := cfg.Server.Listen
 
 	for i := 0; i < len(sls); i++ {
-		logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("address", sls[i].Addr).Str("network", sls[i].Network).Str("protocol", sls[i].Protocol)
+		logEvent := xlog.Logger().Info().Str("log_type", "server").Str("address", sls[i].Addr).Str("network", sls[i].Network).Str("protocol", sls[i].Protocol)
 		switch sls[i].Protocol {
 		case configx.ProtocolTypeDNS:
-			srv.serveDoD(sls[i], wg)
+			srv.serveDoD(&sls[i], wg)
 		case configx.ProtocolTypeDoH:
-			srv.serveDoH(sls[i], wg)
+			srv.serveDoH(&sls[i], wg)
 		case configx.ProtocolTypeDoT:
-			srv.serveDoT(sls[i], wg)
+			srv.serveDoT(&sls[i], wg)
 		case configx.ProtocolTypeDoQ:
-			srv.serveDoQ(sls[i], wg)
+			srv.serveDoQ(&sls[i], wg)
 		default:
 			logEvent.Err(errServerProtocolUnsupport)
 		}
 		logEvent.Msg("")
 	}
 
-	als := cfg.Admin.Listen
-	for i := 0; i < len(als); i++ {
-		srv.serveAdmin(als[i], wg)
-		libnamed.Logger.Info().Str("log_type", "admin").Str("address", als[i].Addr).Str("network", als[i].Network).Str("protocol", als[i].Protocol).Msg("")
-	}
-
-	// prof
-	//srv.serveProf(config.Server.Listen[0], wg)
+	srv.serveAdmin(&cfg.Admin, wg)
 }

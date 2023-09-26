@@ -12,6 +12,7 @@ func TestValidateDomain(t *testing.T) {
 		"a-b.com": true, "a_b.com": true, ".ab.com": false,
 		"ab-.com": false, "-ab.com": false, "ab.com.": true,
 		"ab_.com": true, "_tcp.ab.com": true, ".": true,
+		"google-analytics.com": true, "google-analytics.com.": true,
 	}
 	for k, v := range testCase {
 		if ValidateDomain(k) != v {

@@ -1,30 +1,26 @@
 package serverx
 
 import (
-	"crypto/tls"
 	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/xlog"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
-func (srv *ServerMux) serveDoT(listen configx.Listen, wg *sync.WaitGroup) {
+func (srv *ServerMux) serveDoT(listen *configx.Listen, wg *sync.WaitGroup) {
 	wg.Add(1)
-	go func(addr string, network string) {
-		cert, err := tls.LoadX509KeyPair(listen.TlsConfig.CertFile, listen.TlsConfig.KeyFile)
-		if err != nil {
-			panic(err)
-		}
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
+	go func() {
+
+		ds := dnsServerOpt{
+			compress: !listen.DisableCompressMsg,
 		}
 
 		dos := &dns.Server{
 			Addr:          listen.Addr,
 			Net:           listen.Network,
-			TLSConfig:     tlsConfig,
+			TLSConfig:     listen.TLSConfig,
 			MaxTCPQueries: listen.QueriesPerConn,
 			IdleTimeout:   func() time.Duration { return listen.Timeout.IdleDuration },
 			ReadTimeout:   listen.Timeout.ConnectDuration,
@@ -32,21 +28,21 @@ func (srv *ServerMux) serveDoT(listen configx.Listen, wg *sync.WaitGroup) {
 		}
 
 		mux := dns.NewServeMux()
-		mux.HandleFunc(".", handleDoDRequest)
+		mux.HandleFunc(".", ds.handleDoDRequest)
 		dos.Handler = mux
 
 		srv.registerOnShutdown(func() {
-			libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
+			xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Msg("signal to shutdown server")
 			err := dos.Shutdown()
-			logEvent := libnamed.Logger.Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
+			logEvent := xlog.Logger().Info().Str("log_type", "server").Str("protocol", listen.Protocol).Str("network", listen.Network).Str("addr", listen.Addr).Err(err)
 
 			logEvent.Msg("server has been shutdown")
 			wg.Done()
 		})
 
-		err = dos.ListenAndServe()
+		err := dos.ListenAndServe()
 		if err != nil {
 			panic(err)
 		}
-	}(listen.Addr, listen.Network)
+	}()
 }

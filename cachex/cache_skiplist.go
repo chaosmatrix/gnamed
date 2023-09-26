@@ -1,9 +1,11 @@
 package cachex
 
 import (
+	"encoding/json"
 	"fmt"
-	"gnamed/configx"
-	"gnamed/libnamed"
+	"gnamed/ext/faketimer"
+	"gnamed/ext/xgeoip2"
+	"gnamed/ext/xlog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -12,11 +14,56 @@ import (
 	"github.com/miekg/dns"
 )
 
-func NewDefaultSklCache() {
-	newSklCache(32, 0.5)
+type SklCacheConfig struct {
+	MaxLevel    int     `json:"maxLevel"` // log(1/p)(n)
+	Probability float64 `json:"probability"`
+	MaxCount    int64   `json:"maxCount"`
+	NoEviction  bool    `json:"noEviction"` // default remove the oldest two expired elements
+}
+
+func (c *SklCacheConfig) Parse() error {
+	if c.MaxLevel < 0 || c.MaxLevel >= 128 {
+		return fmt.Errorf("invalid MaxLevel not in [1, 128]: %d", c.MaxLevel)
+	} else if c.MaxLevel == 0 {
+		c.MaxLevel = 32
+	}
+
+	if c.Probability < 0 || c.Probability >= 1 {
+		return fmt.Errorf("invalid Probability not in (0, 1): %f", c.Probability)
+	} else if c.Probability == 0 {
+		c.Probability = 0.5
+	}
+
+	return nil
+}
+
+func (c *SklCacheConfig) marshal() []byte {
+	bs, err := json.Marshal(c)
+	if err != nil {
+		return []byte("{}")
+	}
+	return bs
+}
+
+func (c *SklCacheConfig) NewSklCache() *SklCache {
+	return c.newSklCache()
+}
+
+// if *SklCacheConfig is nil, use default
+func InitDefaultSklCache(c *SklCacheConfig) {
+	if c == nil {
+		c = &SklCacheConfig{
+			MaxLevel:    32,
+			Probability: 0.5,
+		}
+	}
+	c.newSklCache()
 }
 
 type SklCache struct {
+	maxCount   int64 // the limit count of stored elements, no limit if <= 0, delete oldest element when limit hit
+	noEviction bool  // default remove the oldest two expired elements
+
 	lock        *sync.Mutex   // lock for lazy init
 	maxLevel    int           // skiplist maxlevel
 	probability float64       // skiplist probability
@@ -41,22 +88,20 @@ type TableNode struct {
 	reads        *atomic.Uint64 // cache hit count
 }
 
-func NewSklCache(maxLevel int, probability float64) *SklCache {
-	return newSklCache(maxLevel, probability)
-}
+func (c *SklCacheConfig) newSklCache() *SklCache {
 
-func newSklCache(maxLevel int, probability float64) *SklCache {
-
-	libnamed.Logger.Trace().Str("log_type", "cache").Str("cache_mode", configx.CacheModeSkipList).Int("max_level", maxLevel).Float64("probability", probability).Msg("")
+	xlog.Logger().Trace().Str("log_type", "cache").Str("op_type", "new").Str("cache_mode", CacheModeSkipList).RawJSON("options", c.marshal()).Msg("")
 
 	size := 1 << 16
 	tables := make([]*SklTable, size)
 	skls := make([]*SkipList, size)
 
 	sklCache := &SklCache{
+		maxCount:    c.MaxCount,
+		noEviction:  c.NoEviction,
 		lock:        new(sync.Mutex),
-		maxLevel:    maxLevel,
-		probability: probability,
+		maxLevel:    c.MaxLevel,
+		probability: c.Probability,
 		count:       new(atomic.Int64),
 
 		tables: tables,
@@ -116,7 +161,7 @@ func (sklc *SklCache) Get(key string, qtype uint16) (*dns.Msg, int64, bool) {
 		sklt.lock.RUnlock()
 
 		// check ttl
-		if libnamed.GetFakeTimerUnixSecond() > tnode.sklNode.value {
+		if faketimer.GetFakeTimerUnixSecond() > tnode.sklNode.value {
 			// remove
 			sklc.Remove(key, qtype)
 			// steal cache, let caller determine using or not
@@ -139,7 +184,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) 
 	// lazy init
 	sklc.lazyInit(qtype)
 
-	expiredUTC := libnamed.GetFakeTimerUnixSecond() + int64(ttl)
+	expiredUTC := faketimer.GetFakeTimerUnixSecond() + int64(ttl)
 
 	sklt := sklc.tables[qtype]
 	sklt.lock.Lock()
@@ -149,40 +194,43 @@ func (sklc *SklCache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) 
 	skll.lock.Lock()
 	defer skll.lock.Unlock()
 
-	// try to remove first two expired elements
+	count := sklc.count.Load()
+	// try to remove expired elements of this qtype, up to two elements
 	// O(1)
-	if len(sklt.table) > 0 {
-		nowUTC := libnamed.GetFakeTimerUnixSecond()
+	if (len(sklt.table) > 0 && !sklc.noEviction) || (sklc.maxCount > 0 && sklc.maxCount <= count) {
+		nowUTC := faketimer.GetFakeTimerUnixSecond()
 		curr := skll.head
-		if curr.forward[0] != nil && curr.forward[0].value < nowUTC {
+		if curr.forward[0] != nil && (curr.forward[0].value < nowUTC || (sklc.maxCount > 0 && sklc.maxCount <= count)) {
 
-			if len(curr.forward[0].vals) <= 2 {
-				for k := range curr.forward[0].vals {
-					delete(sklt.table, k)
-					sklc.count.Add(-1)
+			expired := curr.forward[0].value < nowUTC
+			hitCountLimit := sklc.maxCount > 0 && sklc.maxCount <= count
+			qtypeS := dns.TypeToString[qtype]
+
+			deletedCnt := 0
+			for k := range curr.forward[0].vals {
+				delete(sklt.table, k)
+				delete(curr.forward[0].vals, k)
+				sklc.count.Add(-1)
+				xlog.Logger().Trace().Str("log_type", "cache").Str("op_type", "evict").Str("name", k).Str("qtype", qtypeS).Bool("expired", expired).Bool("hit_count_limit", hitCountLimit).Msg("")
+				if deletedCnt == 1 {
+					break
 				}
+				deletedCnt++
+			}
+
+			if len(curr.forward[0].vals) == 0 {
 				skll.Erase(curr.forward[0].value)
-			} else {
-				cnt := 0
-				for k := range curr.forward[0].vals {
-					delete(sklt.table, k)
-
-					delete(curr.forward[0].vals, k)
-
-					cnt++
-					if cnt == 2 {
-						break
-					}
-				}
-				sklc.count.Add(-2)
 			}
 		}
 	}
 
+	var oldReads uint64 = 0
 	// remove old
 	if oldTNode, exist := sklt.table[key]; exist {
+		oldReads = oldTNode.reads.Load()
 		if oldTNode.sklNode.value == expiredUTC {
 			// should not reach
+			oldTNode.reads.Add(1)
 			oldTNode.val = value
 			return true
 		}
@@ -197,7 +245,7 @@ func (sklc *SklCache) Set(key string, qtype uint16, value *dns.Msg, ttl uint32) 
 	sklc.count.Add(1)
 
 	reads := &atomic.Uint64{}
-	reads.Store(1)
+	reads.Store(1 + oldReads)
 	// check expireSecond match skipListNode exist or not
 	if node, found := skll.Get(expiredUTC); found {
 		// add new key
@@ -278,13 +326,9 @@ func (sklc *SklCache) Dump() map[string][]uint16 {
 // 2500 ~ 25ms
 // 2500 ~ 12ms (range cache)
 // 2500 ~ 12ms (geo)
-func (sklc *SklCache) Store() *configx.WarmFormat {
-	wf := new(configx.WarmFormat)
-	if wf.Elements == nil {
-		wf.Elements = make(map[string]map[uint16]*configx.WarmElement, sklc.count.Load()+131)
-	}
-	wfe := wf.Elements
-	wf.Start = time.Now()
+func (sklc *SklCache) Store() StoreElements {
+
+	ses := make(StoreElements)
 
 	for qtype, table := range sklc.tables {
 		if table == nil {
@@ -293,25 +337,29 @@ func (sklc *SklCache) Store() *configx.WarmFormat {
 		table.lock.RLock()
 		for qname, tnode := range table.table {
 
-			if wfe[qname] == nil {
-				wfe[qname] = make(map[uint16]*configx.WarmElement, 2)
+			if ses[qname] == nil {
+				ses[qname] = make(map[uint16]*StoreElement, 2)
 			}
-			nwe := &configx.WarmElement{
-				Type:      uint16(qtype),
+			se := &StoreElement{
 				Frequency: int(tnode.reads.Load()),
 			}
 			if tnode.extraElement == nil {
 				tnode.extraElement = &extraElement{
-					Country: libnamed.GetCountryIsoCodeFromMsg(tnode.val),
+					Country: xgeoip2.GetCountryIsoCodeFromMsg(tnode.val),
 				}
 			}
-			nwe.Country = tnode.extraElement.Country
-			nwe.Rcode = tnode.val.Rcode
-			wfe[qname][uint16(qtype)] = nwe
+			se.Country = tnode.extraElement.Country
+			se.Rcode = tnode.val.Rcode
+			old := tnode.val.Compress
+			tnode.val.Compress = false // it's ok
+			se.MsgSize = tnode.val.Len()
+			tnode.val.Compress = old
+			se.MsgSections = len(tnode.val.Question) + len(tnode.val.Answer) + len(tnode.val.Ns) + len(tnode.val.Extra)
+			ses[qname][uint16(qtype)] = se
 		}
 		table.lock.RUnlock()
 	}
-	return wf
+	return ses
 }
 
 // O(k)
@@ -346,8 +394,10 @@ func (sklc *SklCache) EraseBefore(qtype uint16, target int64) {
 // Paper:
 // 1. Skip Lists: A Probabilistic Alternative to Balanced Trees
 //
-// same as LinkList, SkipListNode.Level[i] is LinkList.Next
-// ? change into Double-LinkList, make Delete O(1) ?
+// Performance:
+// 1. convert into double-linklist, make delete node as O(1)
+//
+// in this use-case, for most case, delete node from head, which is O(1)
 type SkipListNode struct {
 	value   int64               // sorted element, expiredUTC = time.Now() + ttl (uint32)
 	vals    map[string]struct{} // hashset
