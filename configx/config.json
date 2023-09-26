@@ -10,6 +10,7 @@
             {"addr": "[::1]:3053", "network": "tcp6", "protocol": "dns"},
             {"addr": "[::1]:3053", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
+            {"addr": "127.0.1.2:443", "network": "udp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "minVersion": 1.2}},
             {"addr": "127.0.1.2:784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}},
             {"addr": "127.0.1.2:3053", "network": "tcp", "protocol": "dns"},
@@ -17,6 +18,7 @@
             {"addr": "[::]:3053", "network": "tcp6", "protocol": "dns"},
             {"addr": "[::]:3053", "network": "udp6", "protocol": "dns"},
             {"addr": "127.0.1.2:30443", "network": "tcp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
+            {"addr": "127.0.1.2:30443", "network": "udp", "protocol": "https", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:30853", "network": "tcp-tls", "protocol": "tls-tcp", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key"}},
             {"addr": "127.0.1.2:30784", "network": "quic", "protocol": "quic", "tls_config": {"certFile": "configx/localhost.crt", "keyFile": "configx/localhost.key", "queriesPerConn": 10}}
         ],
@@ -51,16 +53,20 @@
             "cname.github.io.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01"], "cname": "cname.github.io."},
             "www.github.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01_one"]},
             "github.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_dot_cf_one"]},
-            "com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_adguard_filter_rfc8484_01"]},
+            "com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_adguard_filter_rfc8484_01"], "rr_https":{}},
             "jp.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_adguard_unfilter_rfc8484_01"]},
             "google.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doh_cf_rfc8484_01_one"]},
             "dns.adguard.com.": {"resolve_type": "forward", "nameserver_tags": ["tag_doq_adguard_filter_01"]},
             "nginx.org.": {"resolve_type": "forward", "nameserver_tags": ["tag_doq_adguard_filter_01"]}
         },
-        "hosts": [
-            {"name": "localhost.", "record": "127.0.0.1", "qtype": "A"},
-            {"name": "local.github.io.", "record": "127.0.0.3", "qtype": "A"}
-        ],
+        "hosts": {
+            "rrs": ["www.example.com. 60 IN A 127.0.0.1", "www.example.com. 60 IN AAAA ::1"],
+            "records": [
+                {"name": "local.github.io.", "ttl": 60, "type": "A", "data": "127.0.0.1"},
+                {"name": "www1.example.com.", "ttl": 60, "type": "A", "data": "127.0.0.1"},
+                {"name": "www1.example.com.", "ttl": 60, "type": "AAAA", "data": "::1"}
+            ]
+        },
         "cache": {
             "minTTL": 60,
             "maxTTL": 60,
