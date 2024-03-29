@@ -12,7 +12,7 @@ require (
 	github.com/miekg/dns v1.1.56
 	github.com/oschwald/geoip2-golang v1.9.0
 	github.com/panmari/cuckoofilter v1.0.3
-	github.com/quic-go/quic-go v0.38.1
+	github.com/quic-go/quic-go v0.38.2
 	github.com/rs/zerolog v1.30.0
 	github.com/twmb/murmur3 v1.1.6
 	golang.org/x/net v0.17.0
